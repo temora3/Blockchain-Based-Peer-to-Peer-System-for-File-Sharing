@@ -508,6 +508,21 @@ const AnimatedForm = memo(function AnimatedForm({
           )}
         </BoxReveal>
 
+
+        {/* Forgot password link for sign-in form only - always visible and above submit button */}
+        {header && header.toLowerCase().includes('sign in') && (
+          <BoxReveal boxColor='var(--skeleton)' duration={0.3}>
+            <section className='mb-4 text-center'>
+              <a
+                href='/auth/forgot-password'
+                className='text-sm text-cyan-400 hover:text-cyan-300 transition-colors underline'
+              >
+                Forgot password?
+              </a>
+            </section>
+          </BoxReveal>
+        )}
+
         <BoxReveal
           width='100%'
           boxColor='var(--skeleton)'
