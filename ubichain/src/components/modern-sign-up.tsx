@@ -102,12 +102,12 @@ export default function ModernAnimatedSignUp() {
     await AuthService.signInWithProvider('github');
     setIsLoading(false);
   };
-  const handleApple = async () => {
-    setIsLoading(true);
-    setError(null);
-    await AuthService.signInWithProvider('apple');
-    setIsLoading(false);
-  };
+  // const handleApple = async () => {
+  //   setIsLoading(true);
+  //   setError(null);
+  //   await AuthService.signInWithProvider('apple');
+  //   setIsLoading(false);
+  // };
 
   // Navigate to sign-in page
   const goToSignIn = () => {
@@ -120,35 +120,35 @@ export default function ModernAnimatedSignUp() {
     subHeader: 'Join us today and start your journey',
     fields: [
       {
-        label: 'firstName',
+        label: 'First Name',
         required: true,
         type: 'text' as const,
         placeholder: 'Enter your first name',
         onChange: handleSignUpChange,
       },
       {
-        label: 'lastName',
+        label: 'Last Name',
         required: true,
         type: 'text' as const,
         placeholder: 'Enter your last name',
         onChange: handleSignUpChange,
       },
       {
-        label: 'email',
+        label: 'Email Address',
         required: true,
         type: 'email' as const,
         placeholder: 'Enter your email address',
         onChange: handleSignUpChange,
       },
       {
-        label: 'password',
+        label: 'Password',
         required: true,
         type: 'password' as const,
         placeholder: 'Create a password',
         onChange: handleSignUpChange,
       },
       {
-        label: 'confirmPassword',
+        label: 'Confirm Password',
         required: true,
         type: 'password' as const,
         placeholder: 'Confirm your password',
@@ -178,7 +178,6 @@ export default function ModernAnimatedSignUp() {
             googleLogin="Social Login"
             onGoogleClick={handleGoogle}
             onGithubClick={handleGitHub}
-            onAppleClick={handleApple}
           />
           {success && (
             <div className="mt-4 text-green-500 text-center text-sm">{success}</div>

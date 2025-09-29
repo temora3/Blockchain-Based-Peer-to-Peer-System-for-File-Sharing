@@ -427,7 +427,7 @@ const AnimatedForm = memo(function AnimatedForm({
             <AuthDock
               onGithubClick={onGithubClick}
               onGoogleClick={onGoogleClick}
-              onAppleClick={onAppleClick}
+              // onAppleClick={onAppleClick}
             />
           </BoxReveal>
 
@@ -571,7 +571,7 @@ interface AuthTabsProps {
   googleLogin?: string;
   onGoogleClick?: () => void;
   onGithubClick?: () => void;
-  onAppleClick?: () => void;
+  // onAppleClick?: () => void;
 }
 
 const AuthTabs = memo(function AuthTabs({
@@ -581,7 +581,7 @@ const AuthTabs = memo(function AuthTabs({
   googleLogin,
   onGoogleClick,
   onGithubClick,
-  onAppleClick,
+  // onAppleClick,
 }: AuthTabsProps) {
   return (
     <div className='flex justify-center w-full'>
@@ -595,7 +595,7 @@ const AuthTabs = memo(function AuthTabs({
           googleLogin={googleLogin}
           onGoogleClick={onGoogleClick}
           onGithubClick={onGithubClick}
-          onAppleClick={onAppleClick}
+          // onAppleClick={onAppleClick}
         />
       </div>
     </div>
