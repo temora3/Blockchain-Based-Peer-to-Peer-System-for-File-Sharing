@@ -34,21 +34,91 @@ export default function ModernAnimatedSignIn() {
     event.preventDefault();
     setIsLoading(true);
     setError(undefined);
-    
+
     try {
       const result = await AuthService.signIn({
         email: signInData.email,
         password: signInData.password,
       });
 
+      // Debug: log the error message returned from AuthService
+      if (!result.success) {
+        // eslint-disable-next-line no-console
+        console.log('SignIn error:', result.error);
+      }
+
       if (result.success) {
-        // Redirect to dashboard or home page after successful login
         router.push('/dashboard');
       } else {
-        setError(result.error || 'Failed to sign in');
+        // Custom error handling for user not found, wrong password, and missing fields
+        const errorMsg = result.error?.toLowerCase() || '';
+        if (
+          errorMsg.includes('missing email') ||
+          errorMsg.includes('email is required')
+        ) {
+          setError('Wrong Email or Password');
+        } else if (
+          errorMsg.includes('missing password') ||
+          errorMsg.includes('password is required')
+        ) {
+          setError('Please enter your password.');
+        } else if (
+          errorMsg.includes('user not found') ||
+          errorMsg.includes('invalid login credentials') ||
+          errorMsg.includes('no user found')
+        ) {
+          setError('No account found with that email address. Please sign up.');
+        } else if (
+          errorMsg.includes('invalid password') ||
+          errorMsg.includes('wrong password') ||
+          errorMsg.includes('invalid login credentials')
+        ) {
+          setError('Incorrect password. Please try again or reset your password.');
+        } else if (
+          errorMsg.includes('missing phone') ||
+          errorMsg.includes('phone is required')
+        ) {
+          setError('Please enter your phone number.');
+        } else {
+          setError(result.error || 'Failed to sign in');
+        }
       }
-    } catch (err) {
-      setError('An unexpected error occurred. Please try again.');
+    } catch (err: any) {
+      // Debug: log the error message from the catch block
+      // eslint-disable-next-line no-console
+      console.log('SignIn catch error:', err?.message);
+      // Try to extract error message from err if possible
+      const errMsg = err?.message?.toLowerCase?.() || '';
+      if (
+        errMsg.includes('missing email') ||
+        errMsg.includes('email is required')
+      ) {
+        setError('Please enter your email address.');
+      } else if (
+        errMsg.includes('missing password') ||
+        errMsg.includes('password is required')
+      ) {
+        setError('Please enter your password.');
+      } else if (
+        errMsg.includes('user not found') ||
+        errMsg.includes('invalid login credentials') ||
+        errMsg.includes('no user found')
+      ) {
+        setError('No account found with that email address. Please sign up.');
+      } else if (
+        errMsg.includes('invalid password') ||
+        errMsg.includes('wrong password') ||
+        errMsg.includes('invalid login credentials')
+      ) {
+        setError('Incorrect password. Please try again or reset your password.');
+      } else if (
+        errMsg.includes('missing phone') ||
+        errMsg.includes('phone is required')
+      ) {
+        setError('Please enter your phone number.');
+      } else {
+        setError('An unexpected error occurred. Please try again.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -76,7 +146,7 @@ export default function ModernAnimatedSignIn() {
 
   // Sign-in form configuration
   const signInFormFields = {
-    header: 'Welcome Back',
+  header: 'Sign In',
     subHeader: 'Sign in to your account to continue',
     fields: [
       {
