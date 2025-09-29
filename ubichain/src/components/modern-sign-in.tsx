@@ -18,7 +18,7 @@ export default function ModernAnimatedSignIn() {
     password: '',
   });
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | undefined>(undefined);
 
   // Handle sign-in form changes
   const handleSignInChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -33,7 +33,7 @@ export default function ModernAnimatedSignIn() {
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsLoading(true);
-    setError(null);
+    setError(undefined);
     
     try {
       const result = await AuthService.signIn({
@@ -54,6 +54,21 @@ export default function ModernAnimatedSignIn() {
     }
   };
 
+
+  // Social login handlers
+  const handleGoogle = async () => {
+    setIsLoading(true);
+    setError(undefined);
+    await AuthService.signInWithProvider('google');
+    setIsLoading(false);
+  };
+  const handleGitHub = async () => {
+    setIsLoading(true);
+    setError(undefined);
+    await AuthService.signInWithProvider('github');
+    setIsLoading(false);
+  };
+
   // Navigate to sign-up page
   const goToSignUp = () => {
     router.push('/signup');
@@ -65,14 +80,14 @@ export default function ModernAnimatedSignIn() {
     subHeader: 'Sign in to your account to continue',
     fields: [
       {
-        label: 'email',
+        label: 'Email Address',
         required: true,
         type: 'email' as const,
-        placeholder: 'Enter your email',
+        placeholder: 'Enter your email address',
         onChange: handleSignInChange,
       },
       {
-        label: 'password',
+        label: 'Password',
         required: true,
         type: 'password' as const,
         placeholder: 'Enter your password',
@@ -90,7 +105,7 @@ export default function ModernAnimatedSignIn() {
       <div className="hidden lg:flex lg:w-1/2 h-screen">
         <AuthLampEffect />
       </div>
-      
+
       {/* Right Side - Sign In Form */}
       <div className="w-full lg:w-1/2 flex items-center justify-center bg-slate-950">
         <div className="w-full max-w-md px-6">
@@ -98,6 +113,9 @@ export default function ModernAnimatedSignIn() {
             formFields={signInFormFields}
             goTo={goToSignUp}
             handleSubmit={handleSubmit}
+            googleLogin="Social Login"
+            onGoogleClick={handleGoogle}
+            onGithubClick={handleGitHub}
           />
         </div>
       </div>
