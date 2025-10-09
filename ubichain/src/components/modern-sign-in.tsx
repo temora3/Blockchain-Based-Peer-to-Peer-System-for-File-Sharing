@@ -29,7 +29,6 @@ export default function ModernAnimatedSignIn() {
     }));
   };
 
-  // Handle form submission
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setIsLoading(true);
@@ -41,89 +40,36 @@ export default function ModernAnimatedSignIn() {
         password: signInData.password,
       });
 
-      // Debug: log the error message returned from AuthService
-      if (!result.success) {
-        // eslint-disable-next-line no-console
-        console.log('SignIn error:', result.error);
-      }
-
       if (result.success) {
-        router.push('/dashboard');
+        // Redirect to profile page after successful login
+        router.push('/profile');
       } else {
-        // Custom error handling for user not found, wrong password, and missing fields
+        // Map common Supabase errors to user-friendly message
         const errorMsg = result.error?.toLowerCase() || '';
         if (
           errorMsg.includes('missing email') ||
-          errorMsg.includes('email is required')
-        ) {
-          setError('Wrong Email or Password');
-        } else if (
+          errorMsg.includes('email is required') ||
           errorMsg.includes('missing password') ||
-          errorMsg.includes('password is required')
-        ) {
-          setError('Please enter your password.');
-        } else if (
+          errorMsg.includes('password is required') ||
           errorMsg.includes('user not found') ||
           errorMsg.includes('invalid login credentials') ||
-          errorMsg.includes('no user found')
-        ) {
-          setError('No account found with that email address. Please sign up.');
-        } else if (
+          errorMsg.includes('no user found') ||
           errorMsg.includes('invalid password') ||
-          errorMsg.includes('wrong password') ||
-          errorMsg.includes('invalid login credentials')
+          errorMsg.includes('wrong password')
         ) {
-          setError('Incorrect password. Please try again or reset your password.');
-        } else if (
-          errorMsg.includes('missing phone') ||
-          errorMsg.includes('phone is required')
-        ) {
-          setError('Please enter your phone number.');
+          setError('Wrong Email or Password');
+        } else if (errorMsg.includes('email not confirmed')) {
+          setError('Please confirm your email before signing in.');
         } else {
           setError(result.error || 'Failed to sign in');
         }
       }
-    } catch (err: any) {
-      // Debug: log the error message from the catch block
-      // eslint-disable-next-line no-console
-      console.log('SignIn catch error:', err?.message);
-      // Try to extract error message from err if possible
-      const errMsg = err?.message?.toLowerCase?.() || '';
-      if (
-        errMsg.includes('missing email') ||
-        errMsg.includes('email is required')
-      ) {
-        setError('Please enter your email address.');
-      } else if (
-        errMsg.includes('missing password') ||
-        errMsg.includes('password is required')
-      ) {
-        setError('Please enter your password.');
-      } else if (
-        errMsg.includes('user not found') ||
-        errMsg.includes('invalid login credentials') ||
-        errMsg.includes('no user found')
-      ) {
-        setError('No account found with that email address. Please sign up.');
-      } else if (
-        errMsg.includes('invalid password') ||
-        errMsg.includes('wrong password') ||
-        errMsg.includes('invalid login credentials')
-      ) {
-        setError('Incorrect password. Please try again or reset your password.');
-      } else if (
-        errMsg.includes('missing phone') ||
-        errMsg.includes('phone is required')
-      ) {
-        setError('Please enter your phone number.');
-      } else {
-        setError('An unexpected error occurred. Please try again.');
-      }
+    } catch (err) {
+      setError('An unexpected error occurred. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
-
 
   // Social login handlers
   const handleGoogle = async () => {
@@ -146,11 +92,12 @@ export default function ModernAnimatedSignIn() {
 
   // Sign-in form configuration
   const signInFormFields = {
-  header: 'Sign In',
+    header: 'Sign In',
     subHeader: 'Sign in to your account to continue',
     fields: [
       {
         label: 'Email Address',
+        id: 'email',
         required: true,
         type: 'email' as const,
         placeholder: 'Enter your email address',
@@ -158,6 +105,7 @@ export default function ModernAnimatedSignIn() {
       },
       {
         label: 'Password',
+        id: 'password',
         required: true,
         type: 'password' as const,
         placeholder: 'Enter your password',

@@ -74,13 +74,27 @@ export default function ModernAnimatedSignUp() {
         lastName: signUpData.lastName,
       });
       if (result.success) {
-        setSuccess(result.message || 'Account created successfully!');
-        // Optionally redirect after a short delay
-        setTimeout(() => {
-          router.push('/dashboard');
-        }, 1200);
+        // If the message indicates email confirmation is required, show message and do not redirect
+        if (result.message && result.message.toLowerCase().includes('confirmation')) {
+          setSuccess(result.message);
+        } else {
+          setSuccess(result.message || 'Account created successfully!');
+          setTimeout(() => {
+            router.push('/profile');
+          }, 1200);
+        }
       } else {
-        setError(result.error || 'Failed to sign up');
+        // Map common Supabase errors to user-friendly message
+        const errorMsg = result.error?.toLowerCase() || '';
+        if (
+          errorMsg.includes('email already registered') ||
+          errorMsg.includes('user already registered') ||
+          errorMsg.includes('user already exists')
+        ) {
+          setError('An account with this email already exists.');
+        } else {
+          setError(result.error || 'Failed to sign up');
+        }
       }
     } catch (err) {
       setError('An unexpected error occurred. Please try again.');
@@ -121,6 +135,7 @@ export default function ModernAnimatedSignUp() {
     fields: [
       {
         label: 'First Name',
+        id: 'firstName',
         required: true,
         type: 'text' as const,
         placeholder: 'Enter your first name',
@@ -128,6 +143,7 @@ export default function ModernAnimatedSignUp() {
       },
       {
         label: 'Last Name',
+        id: 'lastName',
         required: true,
         type: 'text' as const,
         placeholder: 'Enter your last name',
@@ -135,6 +151,7 @@ export default function ModernAnimatedSignUp() {
       },
       {
         label: 'Email Address',
+        id: 'email',
         required: true,
         type: 'email' as const,
         placeholder: 'Enter your email address',
@@ -142,6 +159,7 @@ export default function ModernAnimatedSignUp() {
       },
       {
         label: 'Password',
+        id: 'password',
         required: true,
         type: 'password' as const,
         placeholder: 'Create a password',
@@ -149,6 +167,7 @@ export default function ModernAnimatedSignUp() {
       },
       {
         label: 'Confirm Password',
+        id: 'confirmPassword',
         required: true,
         type: 'password' as const,
         placeholder: 'Confirm your password',
@@ -157,7 +176,7 @@ export default function ModernAnimatedSignUp() {
     ],
     submitButton: isLoading ? 'Creating Account...' : 'Create Account',
     textVariantButton: 'Already have an account? Sign in',
-  errorField: error || undefined,
+    errorField: error || undefined,
   };
 
   return (
@@ -180,7 +199,12 @@ export default function ModernAnimatedSignUp() {
             onGithubClick={handleGitHub}
           />
           {success && (
-            <div className="mt-4 text-green-500 text-center text-sm">{success}</div>
+            <div className="mt-4 text-green-500 text-center text-sm">
+              {success}
+              {success.toLowerCase().includes('confirmation') && (
+                <div className="mt-2 text-cyan-400">Check your email for a confirmation link to activate your account.</div>
+              )}
+            </div>
           )}
         </div>
       </div>
