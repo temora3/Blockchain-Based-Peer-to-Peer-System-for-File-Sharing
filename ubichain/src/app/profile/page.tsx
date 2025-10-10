@@ -1,5 +1,68 @@
+// 2FA Modal Prompt
 "use client";
+import React from "react";
 
+function TwoFAModal({ open, onClose, onVerify, verifying, error }: {
+  open: boolean;
+  onClose: () => void;
+  onVerify: (code: string) => void;
+  verifying: boolean;
+  error?: string | null;
+}) {
+  const [code, setCode] = useState("");
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-xs shadow-xl">
+        <div className="text-lg font-semibold text-zinc-100 mb-2">2FA Verification</div>
+        <div className="text-sm text-zinc-400 mb-4">Enter your 6-digit code from your authenticator app.</div>
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 mb-2"
+          placeholder="123456"
+          value={code}
+          onChange={e => setCode(e.target.value)}
+          disabled={verifying}
+        />
+        {error && <div className="text-xs text-red-400 mb-2">{error}</div>}
+        <div className="flex gap-2 mt-2">
+          <button
+            className="flex-1 rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
+            onClick={onClose}
+            disabled={verifying}
+          >Cancel</button>
+          <button
+            className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+            onClick={() => onVerify(code)}
+            disabled={verifying || code.length !== 6}
+          >{verifying ? "Verifying…" : "Verify"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Helper to ensure SVG has xmlns attribute and decode data URI if needed
+function patchSvgNamespace(svg: string | null): string {
+  if (!svg) return "";
+  // If it's a data URI, decode it
+  if (svg.startsWith("data:image/svg+xml")) {
+    try {
+      const commaIdx = svg.indexOf(",");
+      if (commaIdx !== -1) {
+        svg = decodeURIComponent(svg.slice(commaIdx + 1));
+      }
+    } catch {}
+  }
+  if (svg.includes("xmlns=")) return svg;
+  return svg.replace(
+    /<svg(\s|>)/,
+    '<svg xmlns="http://www.w3.org/2000/svg"$1'
+  );
+}
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
@@ -14,6 +77,8 @@ import {
   Settings,
   AlertTriangle,
   Copy,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 type ProfileUser = {
@@ -37,6 +102,100 @@ function mask(str: string, visible: number = 4) {
 }
 
 export default function UserProfile() {
+  // Password visibility toggles
+  const [showOldPassword, setShowOldPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  // 2FA inline section state
+  const [show2FASection, setShow2FASection] = useState(false);
+  const [twoFACode, setTwoFACode] = useState("");
+  // Top-level render debug log (after all state declarations)
+  // This will log on every render and show the current value of show2FASection
+  console.log('UserProfile render, show2FASection:', show2FASection);
+  // Helper for password validation
+  function validatePasswordFields() {
+    if (!oldPassword || !newPassword || !confirmPassword) {
+      return "All fields are required.";
+    }
+    if (newPassword !== confirmPassword) {
+      return "New passwords do not match.";
+    }
+    if (oldPassword === newPassword) {
+      return "New password must be different from old password.";
+    }
+    return null;
+  }
+  // Password change feedback state
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+  // Change password expand state
+  const [showPasswordFields, setShowPasswordFields] = useState(false);
+  const [oldPassword, setOldPassword] = useState("");
+  // ...existing code...
+  const [twoFAVerifying, setTwoFAVerifying] = useState(false);
+  const [twoFAError, setTwoFAError] = useState<string | null>(null);
+  const twoFAActionRef = React.useRef<null | (() => Promise<void>)>(null);
+
+  // Helper to trigger 2FA before sensitive actions
+  // Accepts an action that takes an optional accessToken
+  const aal2AccessTokenRef = React.useRef<string | null>(null);
+  async function require2FA(action: (accessToken?: string | null) => Promise<void>) {
+    setTwoFAError(null);
+    setTwoFACode("");
+    try {
+      const { data, error } = await supabase.auth.mfa.listFactors();
+      if (error) throw error;
+      const totp = data?.all?.find((f: any) => f.factor_type === "totp" && f.status === "verified");
+      if (totp) {
+        twoFAActionRef.current = action;
+        setShow2FASection(true);
+      } else {
+        await action();
+      }
+    } catch (e) {
+      await action();
+    }
+  }
+
+  // 2FA verify handler
+  async function handle2FAVerify(code: string) {
+    setTwoFAVerifying(true);
+    setTwoFAError(null);
+    try {
+      // Find the TOTP factor id
+      const { data, error } = await supabase.auth.mfa.listFactors();
+      if (error) throw error;
+      const totp = data?.all?.find((f: any) => f.factor_type === "totp" && f.status === "verified");
+      if (!totp) throw new Error("No TOTP factor found");
+      // 1. Create challenge
+      const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId: totp.id });
+      if (challengeError) throw challengeError;
+      // 2. Verify code
+      const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({ factorId: totp.id, challengeId: challengeData.id, code });
+      if (verifyError) throw verifyError;
+      // 3. Set AAL2 session using returned tokens
+      if (verifyData?.access_token && verifyData?.refresh_token) {
+        await supabase.auth.setSession({
+          access_token: verifyData.access_token,
+          refresh_token: verifyData.refresh_token,
+        });
+      } else {
+        throw new Error("2FA verification did not return session tokens");
+      }
+      setShow2FASection(false);
+      setTwoFAVerifying(false);
+      setTwoFAError(null);
+      setTwoFACode("");
+      if (twoFAActionRef.current) {
+        await twoFAActionRef.current();
+        twoFAActionRef.current = null;
+      }
+    } catch (e: any) {
+      setTwoFAError(e.message || "Invalid code");
+      setTwoFAVerifying(false);
+      console.error('2FA verification error', e);
+    }
+  }
 
 
   // ...other state declarations...
@@ -242,165 +401,285 @@ export default function UserProfile() {
               <div className="space-y-6">
                 <SectionTitle icon={<ShieldCheck className="h-5 w-5" />} title="Security" subtitle="Keep your account secure" />
                 {/* 2FA Section */}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4 mb-6">
-                  <div className="mb-2 flex items-center gap-2">
-                    <span className="font-medium text-zinc-200">Two-Factor Authentication (2FA)</span>
-                    {mfaLoading && <span className="text-xs text-zinc-400 ml-2">Checking…</span>}
-                    {mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-400 ring-1 ring-inset ring-emerald-500/30">Enabled</span>}
-                    {!mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-zinc-500/15 px-2 py-1 text-xs text-zinc-400 ring-1 ring-inset ring-zinc-500/30">Disabled</span>}
-                  </div>
-                  {mfaError && <div className="text-xs text-red-400 mb-2">{mfaError}</div>}
-                  {/* Enroll button */}
-                  {!mfaEnrolled && !totpQr && (
-                    <button
-                      className="rounded-lg bg-cyan-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-cyan-700 disabled:opacity-60"
-                      disabled={mfaLoading}
-                      onClick={async () => {
-                        setMfaError(null);
-                        setMfaLoading(true);
-                        try {
-                          // Clean up any unverified TOTP factors first
-                          const { data: factorsData, error: factorsError } = await supabase.auth.mfa.listFactors();
-                          if (factorsError) throw factorsError;
-                          const unverifiedTotp = (factorsData?.all || []).filter((f: any) => f.factor_type === "totp" && f.status !== "verified");
-                          for (const factor of unverifiedTotp) {
-                            await supabase.auth.mfa.unenroll({ factorId: factor.id });
-                          }
-                          // Now enroll new TOTP
-                          const { data, error } = await supabase.auth.mfa.enroll({ factorType: "totp" });
-                          if (error) throw error;
-                          setTotpSecret(data.totp.secret);
-                          setTotpQr(data.totp.qr_code);
-                          // Save factorId for verification
-                          (window as any)._supabaseTotpFactorId = data.id;
-                        } catch (e: any) {
-                          setMfaError(e.message || "Failed to start 2FA setup");
-                        } finally {
-                          setMfaLoading(false);
-                        }
-                      }}
-                    >
-                      Set up 2FA
-                    </button>
-                  )}
-                  {/* Show QR and verify */}
-                  {totpQr && !mfaEnrolled && (
-                    <div className="mt-4 space-y-2">
-                      <div className="text-zinc-300 text-sm">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc):</div>
-                      <div className="flex items-center gap-4 mt-2">
-                        <img
-                          src={`data:image/svg+xml;utf8,${encodeURIComponent(totpQr ?? "")}`}
-                          alt="TOTP QR Code"
-                          width={120}
-                          height={120}
-                          className="rounded-lg border border-zinc-700 bg-white"
-                        />
-                        <div className="text-xs text-zinc-400 break-all">Secret: <span className="font-mono text-zinc-200">{totpSecret}</span></div>
-                      </div>
-                      <div className="mt-2">
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          pattern="[0-9]{6}"
-                          maxLength={6}
-                          placeholder="Enter 6-digit code"
-                          className="rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 w-40"
-                          value={totpCode}
-                          onChange={e => setTotpCode(e.target.value)}
-                        />
-                        <button
-                          className="ml-2 rounded-lg bg-emerald-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
-                          disabled={verifying || totpCode.length !== 6}
-                          onClick={async () => {
-                            setVerifying(true);
-                            setMfaError(null);
-                            try {
-                              // Get factorId from enroll step
-                              const factorId = (window as any)._supabaseTotpFactorId;
-                              if (!factorId) throw new Error("Missing TOTP factorId");
-                              // 1. Create challenge
-                              const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
-                              if (challengeError) throw challengeError;
-                              // 2. Verify code
-                              const { error: verifyError } = await supabase.auth.mfa.verify({ factorId, challengeId: challengeData.id, code: totpCode });
-                              if (verifyError) throw verifyError;
-                              setTotpQr(null);
-                              setTotpSecret(null);
-                              setTotpCode("");
-                              setMfaEnrolled(true);
-                              showToast("2FA enabled!");
-                            } catch (e: any) {
-                              setMfaError(e.message || "Failed to verify code");
-                            } finally {
-                              setVerifying(false);
-                            }
-                          }}
-                        >
-                          {verifying ? "Verifying…" : "Verify"}
-                        </button>
-                      </div>
+                <div className="mb-8">
+                  <div className="mb-3 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1">Two-Factor Authentication (2FA)</div>
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="font-medium text-zinc-200">Status:</span>
+                      {mfaLoading && <span className="text-xs text-zinc-400 ml-2">Checking…</span>}
+                      {mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-400 ring-1 ring-inset ring-emerald-500/30">Enabled</span>}
+                      {!mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-zinc-500/15 px-2 py-1 text-xs text-zinc-400 ring-1 ring-inset ring-zinc-500/30">Disabled</span>}
                     </div>
-                  )}
-                  {/* Disable 2FA */}
-                  {mfaEnrolled && (
-                    <div className="mt-4">
+                    {mfaError && <div className="text-xs text-red-400 mb-2">{mfaError}</div>}
+                    {/* Enroll button */}
+                    {!mfaEnrolled && !totpQr && (
                       <button
-                        className="rounded-lg bg-red-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-red-700 disabled:opacity-60"
+                        className="rounded-lg bg-cyan-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-cyan-700 disabled:opacity-60"
                         disabled={mfaLoading}
                         onClick={async () => {
                           setMfaError(null);
                           setMfaLoading(true);
                           try {
-                            // Find the TOTP factor id
-                            const { data, error } = await supabase.auth.mfa.listFactors();
+                            // Clean up any unverified TOTP factors first
+                            const { data: factorsData, error: factorsError } = await supabase.auth.mfa.listFactors();
+                            if (factorsError) throw factorsError;
+                            const unverifiedTotp = (factorsData?.all || []).filter((f: any) => f.factor_type === "totp" && f.status !== "verified");
+                            for (const factor of unverifiedTotp) {
+                              await supabase.auth.mfa.unenroll({ factorId: factor.id });
+                            }
+                            // Now enroll new TOTP
+                            const { data, error } = await supabase.auth.mfa.enroll({ factorType: "totp" });
                             if (error) throw error;
-                            const totp = data?.all?.find((f: any) => f.factor_type === "totp" && f.status === "verified");
-                            if (!totp) throw new Error("No TOTP factor found");
-                            const { error: removeError } = await supabase.auth.mfa.unenroll({ factorId: totp.id });
-                            if (removeError) throw removeError;
-                            setMfaEnrolled(false);
-                            showToast("2FA disabled");
+                            setTotpSecret(data.totp.secret);
+                            setTotpQr(data.totp.qr_code);
+                            // Save factorId for verification
+                            (window as any)._supabaseTotpFactorId = data.id;
                           } catch (e: any) {
-                            setMfaError(e.message || "Failed to disable 2FA");
+                            setMfaError(e.message || "Failed to start 2FA setup");
                           } finally {
                             setMfaLoading(false);
                           }
                         }}
                       >
-                        Disable 2FA
+                        Set up 2FA
                       </button>
-                    </div>
+                    )}
+                    {/* Show QR and verify */}
+                    {totpQr && !mfaEnrolled && (
+                      <div className="mt-4 space-y-2">
+                        <div className="text-zinc-300 text-sm">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc):</div>
+                        <div className="flex items-center gap-4 mt-2">
+                          <div
+                            className="rounded-lg border border-zinc-700 bg-white"
+                            style={{ width: 250, height: 250, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
+                            dangerouslySetInnerHTML={{ __html: patchSvgNamespace(totpQr) }}
+                          />
+                          <div className="text-xs text-zinc-400 break-all">Secret: <span className="font-mono text-zinc-200">{totpSecret}</span></div>
+                        </div>
+                        <div className="mt-2">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]{6}"
+                            maxLength={6}
+                            placeholder="Enter 6-digit code"
+                            className="rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 w-40"
+                            value={totpCode}
+                            onChange={e => setTotpCode(e.target.value)}
+                          />
+                          <button
+                            className="ml-2 rounded-lg bg-emerald-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+                            disabled={verifying || totpCode.length !== 6}
+                            onClick={async () => {
+                              setVerifying(true);
+                              setMfaError(null);
+                              try {
+                                // Get factorId from enroll step
+                                const factorId = (window as any)._supabaseTotpFactorId;
+                                if (!factorId) throw new Error("Missing TOTP factorId");
+                                // 1. Create challenge
+                                const { data: challengeData, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+                                if (challengeError) throw challengeError;
+                                // 2. Verify code
+                                const { error: verifyError } = await supabase.auth.mfa.verify({ factorId, challengeId: challengeData.id, code: totpCode });
+                                if (verifyError) throw verifyError;
+                                setTotpQr(null);
+                                setTotpSecret(null);
+                                setTotpCode("");
+                                setMfaEnrolled(true);
+                                showToast("2FA enabled!");
+                              } catch (e: any) {
+                                setMfaError(e.message || "Failed to verify code");
+                              } finally {
+                                setVerifying(false);
+                              }
+                            }}
+                          >
+                            {verifying ? "Verifying…" : "Verify"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Disable 2FA */}
+                    {mfaEnrolled && (
+                      <div className="mt-4">
+                        <button
+                          className="rounded-lg bg-red-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-red-700 disabled:opacity-60"
+                          disabled={mfaLoading}
+                          onClick={async () => {
+                            setMfaError(null);
+                            setMfaLoading(true);
+                            try {
+                              // Find the TOTP factor id
+                              const { data, error } = await supabase.auth.mfa.listFactors();
+                              if (error) throw error;
+                              const totp = data?.all?.find((f: any) => f.factor_type === "totp" && f.status === "verified");
+                              if (!totp) throw new Error("No TOTP factor found");
+                              const { error: removeError } = await supabase.auth.mfa.unenroll({ factorId: totp.id });
+                              if (removeError) throw removeError;
+                              setMfaEnrolled(false);
+                              showToast("2FA disabled");
+                            } catch (e: any) {
+                              setMfaError(e.message || "Failed to disable 2FA");
+                            } finally {
+                              setMfaLoading(false);
+                            }
+                          }}
+                        >
+                          Disable 2FA
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {/* Password Change Section */}
+                <div className="mb-8">
+                  <div className="mb-3 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1 flex items-center justify-between">
+                    <span>Change Password</span>
+                    <button
+                      onClick={() => setShowPasswordFields((v) => !v)}
+                      aria-expanded={showPasswordFields}
+                    >
+                      {showPasswordFields ? "Cancel" : "Change Password"}
+                    </button>
+                  </div>
+                  {showPasswordFields && (
+                    <>
+                      {/* Inline 2FA Section (appears when show2FASection is true) */}
+                      {show2FASection && (
+                        <div className="mb-6 p-4 rounded-xl border border-emerald-700 bg-emerald-950/40 flex flex-col items-center max-w-md mx-auto">
+                          <div className="text-lg font-semibold text-emerald-200 mb-2">2FA Verification Required</div>
+                          <div className="text-sm text-emerald-100 mb-4">Enter your 6-digit code from your authenticator app to continue.</div>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]{6}"
+                            maxLength={6}
+                            className="w-40 rounded-lg border border-emerald-700 bg-emerald-950/60 px-3 py-2 text-emerald-200 mb-2 text-center"
+                            placeholder="123456"
+                            value={twoFACode}
+                            onChange={e => setTwoFACode(e.target.value)}
+                            disabled={twoFAVerifying}
+                          />
+                          {twoFAError && <div className="text-xs text-red-400 mb-2">{twoFAError}</div>}
+                          <div className="flex gap-2 mt-2">
+                            <button
+                              className="rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
+                              onClick={() => { setShow2FASection(false); setTwoFACode(""); setTwoFAError(null); setTwoFAVerifying(false); }}
+                              disabled={twoFAVerifying}
+                            >Cancel</button>
+                            <button
+                              className="rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+                              onClick={() => handle2FAVerify(twoFACode)}
+                              disabled={twoFAVerifying || twoFACode.length !== 6}
+                            >{twoFAVerifying ? "Verifying…" : "Verify"}</button>
+                          </div>
+                        </div>
+                      )}
+                      <div className="grid gap-4 sm:grid-cols-3">
+                        <div className="space-y-2">
+                          <label className="text-sm text-zinc-300">Old password</label>
+                          <div className="relative">
+                            <input
+                              type={showOldPassword ? "text" : "password"}
+                              value={oldPassword}
+                              onChange={(e) => setOldPassword(e.target.value)}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                            />
+                            <button
+                              type="button"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              tabIndex={-1}
+                              onClick={() => setShowOldPassword((v) => !v)}
+                              aria-label={showOldPassword ? "Hide password" : "Show password"}
+                            >
+                              {showOldPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm text-zinc-300">New password</label>
+                          <div className="relative">
+                            <input
+                              type={showNewPassword ? "text" : "password"}
+                              value={newPassword}
+                              onChange={(e) => setNewPassword(e.target.value)}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                            />
+                            <button
+                              type="button"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              tabIndex={-1}
+                              onClick={() => setShowNewPassword((v) => !v)}
+                              aria-label={showNewPassword ? "Hide password" : "Show password"}
+                            >
+                              {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm text-zinc-300">Confirm password</label>
+                          <div className="relative">
+                            <input
+                              type={showConfirmPassword ? "text" : "password"}
+                              value={confirmPassword}
+                              onChange={(e) => setConfirmPassword(e.target.value)}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                            />
+                            <button
+                              type="button"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              tabIndex={-1}
+                              onClick={() => setShowConfirmPassword((v) => !v)}
+                              aria-label={showConfirmPassword ? "Hide password" : "Show password"}
+                            >
+                              {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-4">
+                        <button
+                          disabled={passwordSaving}
+                          onClick={() => {
+                            setPasswordError(null);
+                            setPasswordSuccess(null);
+                            const validation = validatePasswordFields();
+                            if (validation) {
+                              setPasswordError(validation);
+                              return;
+                            }
+                            require2FA(async () => {
+                              setPasswordSaving(true);
+                              setPasswordError(null);
+                              setPasswordSuccess(null);
+                              const res = await AuthService.updatePassword(newPassword, oldPassword);
+                              setPasswordSaving(false);
+                              if (res.success) {
+                                setPasswordSuccess("Password updated successfully!");
+                                setOldPassword("");
+                                setNewPassword("");
+                                setConfirmPassword("");
+                                setShowPasswordFields(false);
+                              } else {
+                                setPasswordError(res.error || "Failed to update password");
+                              }
+                            });
+                          }}
+                          className="inline-flex items-center gap-2 rounded-lg bg-zinc-100/10 px-4 py-2 text-sm font-medium text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-100/15 disabled:opacity-60"
+                        >
+                          {passwordSaving ? (
+                            <>
+                              <span className="animate-spin inline-block mr-2 w-4 h-4 border-2 border-t-transparent border-zinc-200 rounded-full align-middle"></span>
+                              Updating…
+                            </>
+                          ) : "Update password"}
+                        </button>
+                        {passwordError && <div className="mt-2 text-sm text-red-400">{passwordError}</div>}
+                        {passwordSuccess && <div className="mt-2 text-sm text-emerald-400">{passwordSuccess}</div>}
+                      </div>
+                    </>
                   )}
-                </div>
-                {/* Password change section */}
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm text-zinc-300">New password</label>
-                    <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200" />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm text-zinc-300">Confirm password</label>
-                    <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200" />
-                  </div>
-                </div>
-                <div>
-                  <button
-                    disabled={passwordSaving || !newPassword || newPassword !== confirmPassword}
-                    onClick={async () => {
-                      if (!newPassword || newPassword !== confirmPassword) return;
-                      setPasswordSaving(true);
-                      const res = await AuthService.updatePassword(newPassword);
-                      setPasswordSaving(false);
-                      showToast(res.success ? "Password updated" : res.error || "Failed to update password");
-                      if (res.success) {
-                        setNewPassword("");
-                        setConfirmPassword("");
-                      }
-                    }}
-                    className="inline-flex items-center gap-2 rounded-lg bg-zinc-100/10 px-4 py-2 text-sm font-medium text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-100/15 disabled:opacity-60"
-                  >
-                    {passwordSaving ? "Updating…" : "Update password"}
-                  </button>
                 </div>
               </div>
             )}
@@ -455,10 +734,41 @@ export default function UserProfile() {
                   </button>
                   <button
                     className="w-full rounded-lg bg-red-500/10 px-4 py-2 text-red-300 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/15"
-                    onClick={() => showToast("Delete account not implemented")}
+                    onClick={() => require2FA(async () => showToast("Delete account not implemented"))}
                   >
-                    Delete account (coming soon)
+                    Delete account (2FA required)
                   </button>
+      {/* Inline 2FA Section (appears when show2FASection is true) */}
+      {show2FASection && (
+        <div className="mb-6 p-4 rounded-xl border border-emerald-700 bg-emerald-950/40 flex flex-col items-center max-w-md mx-auto">
+          <div className="text-lg font-semibold text-emerald-200 mb-2">2FA Verification Required</div>
+          <div className="text-sm text-emerald-100 mb-4">Enter your 6-digit code from your authenticator app to continue.</div>
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            className="w-40 rounded-lg border border-emerald-700 bg-emerald-950/60 px-3 py-2 text-emerald-200 mb-2 text-center"
+            placeholder="123456"
+            value={twoFACode}
+            onChange={e => setTwoFACode(e.target.value)}
+            disabled={twoFAVerifying}
+          />
+          {twoFAError && <div className="text-xs text-red-400 mb-2">{twoFAError}</div>}
+          <div className="flex gap-2 mt-2">
+            <button
+              className="rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
+              onClick={() => { setShow2FASection(false); setTwoFACode(""); setTwoFAError(null); setTwoFAVerifying(false); }}
+              disabled={twoFAVerifying}
+            >Cancel</button>
+            <button
+              className="rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+              onClick={() => handle2FAVerify(twoFACode)}
+              disabled={twoFAVerifying || twoFACode.length !== 6}
+            >{twoFAVerifying ? "Verifying…" : "Verify"}</button>
+          </div>
+        </div>
+      )}
                 </div>
               </div>
             )}
