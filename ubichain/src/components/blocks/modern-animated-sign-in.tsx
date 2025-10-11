@@ -321,6 +321,7 @@ type FieldType = 'text' | 'email' | 'password';
 
 type Field = {
   label: string;
+  id?: string;
   required?: boolean;
   type: FieldType;
   placeholder?: string;
@@ -370,19 +371,19 @@ const AnimatedForm = memo(function AnimatedForm({
   const validateForm = (event: FormEvent<HTMLFormElement>) => {
     const currentErrors: Errors = {};
     fields.forEach((field) => {
-      const value = (event.target as HTMLFormElement)[field.label]?.value;
+      const key = field.id || field.label;
+      const value = (event.target as HTMLFormElement)[key]?.value;
 
       if (field.required && !value) {
-        currentErrors[field.label] = `${field.label} is required`;
+        currentErrors[key] = `${field.label} is required`;
       }
 
       if (field.type === 'email' && value && !/\S+@\S+\.\S+/.test(value)) {
-        currentErrors[field.label] = 'Invalid email address';
+        currentErrors[key] = 'Invalid email address';
       }
 
       if (field.type === 'password' && value && value.length < 6) {
-        currentErrors[field.label] =
-          'Password must be at least 6 characters long';
+        currentErrors[key] = 'Password must be at least 6 characters long';
       }
     });
     return currentErrors;
@@ -448,9 +449,9 @@ const AnimatedForm = memo(function AnimatedForm({
           className={`grid grid-cols-1 md:grid-cols-${fieldPerRow} mb-4`}
         >
           {fields.map((field) => (
-            <section key={field.label} className='flex flex-col gap-2'>
+            <section key={field.id || field.label} className='flex flex-col gap-2'>
               <BoxReveal boxColor='var(--skeleton)' duration={0.3}>
-                <Label htmlFor={field.label}>
+                <Label htmlFor={field.id || field.label}>
                   {field.label} <span className='text-red-500'>*</span>
                 </Label>
               </BoxReveal>
@@ -470,7 +471,7 @@ const AnimatedForm = memo(function AnimatedForm({
                           : 'password'
                         : field.type
                     }
-                    id={field.label}
+                    id={field.id || field.label}
                     placeholder={field.placeholder}
                     onChange={field.onChange}
                   />
@@ -491,9 +492,9 @@ const AnimatedForm = memo(function AnimatedForm({
                 </section>
 
                 <section className='h-4'>
-                  {errors[field.label] && (
+                  {errors[field.id || field.label] && (
                     <p className='text-red-500 text-xs'>
-                      {errors[field.label]}
+                      {errors[field.id || field.label]}
                     </p>
                   )}
                 </section>

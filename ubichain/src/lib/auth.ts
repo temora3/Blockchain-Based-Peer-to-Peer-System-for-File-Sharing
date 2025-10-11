@@ -188,29 +188,27 @@ export class AuthService {
     }
   }
 
-  // Update Password
-  static async updatePassword(newPassword: string): Promise<AuthResponse> {
+  // Update Password (requires old password for verification or AAL2 access token)
+  static async updatePassword(newPassword: string, oldPassword: string, accessToken?: string | null): Promise<AuthResponse> {
     try {
-      const { error } = await supabase.auth.updateUser({
-        password: newPassword,
-      })
-
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) {
+        console.error('Error updating password', error);
         return {
           success: false,
           error: error.message,
-        }
+        };
       }
-
       return {
         success: true,
         message: 'Password updated successfully!',
-      }
-    } catch (error) {
+      };
+    } catch (error: any) {
+      console.error('Unexpected error updating password', error);
       return {
         success: false,
-        error: 'An unexpected error occurred while updating password.',
-      }
+        error: error?.message || 'An unexpected error occurred while updating password.',
+      };
     }
   }
 
