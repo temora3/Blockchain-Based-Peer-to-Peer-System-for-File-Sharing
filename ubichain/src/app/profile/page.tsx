@@ -66,6 +66,7 @@ function patchSvgNamespace(svg: string | null): string {
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
+import { EnhancedImageUpload } from "../../components/ui/enhanced-image-upload";
 import AuthService from "@/lib/auth";
 import {
   LogOut,
@@ -91,6 +92,7 @@ type ProfileUser = {
   lastName?: string | null;
   providers?: string[];
   emailVerified?: boolean;
+  profilePic?: string | null;
 };
 
 type TabKey = "overview" | "account" | "security" | "sessions" | "providers" | "keys" | "danger";
@@ -237,9 +239,14 @@ export default function UserProfile() {
   const [user, setUser] = useState<ProfileUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
+  const [profilePicUploading, setProfilePicUploading] = useState(false);
+  const [profilePicFile, setProfilePicFile] = useState<File | null>(null);
+  const [tempProfilePicUrl, setTempProfilePicUrl] = useState<string | null>(null);
+  const [profilePicChanged, setProfilePicChanged] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-
   // Account form state
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -268,10 +275,12 @@ export default function UserProfile() {
         lastName: meta.last_name ?? null,
         providers: (appMeta.providers as string[]) || [],
         emailVerified: Boolean((supaUser as any).email_confirmed_at),
+        profilePic: meta.profile_pic || null,
       };
       setUser(profileUser);
       setFirstName(profileUser.firstName || "");
       setLastName(profileUser.lastName || "");
+      setProfilePicUrl(meta.profile_pic || null);
       setLoading(false);
     }
     load();
@@ -307,9 +316,17 @@ export default function UserProfile() {
         {/* Header */}
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 backdrop-blur">
           <div className="flex items-center gap-4">
-            <div className="h-16 w-16 rounded-xl bg-gradient-to-br from-cyan-500 to-indigo-600 grid place-items-center text-white text-2xl font-bold">
-              {initials}
-            </div>
+            {profilePicUrl ? (
+              <img 
+                src={profilePicUrl} 
+                alt="Profile" 
+                className="h-16 w-16 rounded-xl object-cover border-2 border-zinc-700"
+              />
+            ) : (
+              <div className="h-16 w-16 rounded-xl bg-gradient-to-br from-cyan-500 to-indigo-600 grid place-items-center text-white text-2xl font-bold">
+                {initials}
+              </div>
+            )}
             <div className="flex-1">
               <div className="text-white text-xl font-semibold">
                 {user.fullName || user.email}
@@ -344,7 +361,6 @@ export default function UserProfile() {
             <NavItem icon={<ShieldCheck className="h-4 w-4" />} label="Security" active={active === "security"} onClick={() => setActive("security")} />
             <NavItem icon={<Settings className="h-4 w-4" />} label="Sessions" active={active === "sessions"} onClick={() => setActive("sessions")} />
             <NavItem icon={<Link2 className="h-4 w-4" />} label="Providers" active={active === "providers"} onClick={() => setActive("providers")} />
-            <NavItem icon={<KeyRound className="h-4 w-4" />} label="API Keys" active={active === "keys"} onClick={() => setActive("keys")} />
             <NavItem icon={<AlertTriangle className="h-4 w-4" />} label="Danger" active={active === "danger"} onClick={() => setActive("danger")} />
           </aside>
 
@@ -363,36 +379,133 @@ export default function UserProfile() {
             )}
 
             {active === "account" && (
-              <div className="space-y-6">
-                <SectionTitle icon={<User2 className="h-5 w-5" />} title="Account" subtitle="Manage your profile details" />
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <label className="text-sm text-zinc-300">First name</label>
-                    <input value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Jane" className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 placeholder:text-zinc-500" />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm text-zinc-300">Last name</label>
-                    <input value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Doe" className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 placeholder:text-zinc-500" />
-                  </div>
-                </div>
+              <div className="space-y-10">
+                {/* Profile Picture Section */}
                 <div>
-                  <button
-                    disabled={saving}
-                    onClick={async () => {
-                      setSaving(true);
-                      const fullName = [firstName, lastName].filter(Boolean).join(" ");
-                      const { error } = await supabase.auth.updateUser({
-                        data: { first_name: firstName || null, last_name: lastName || null, full_name: fullName || null },
-                      });
-                      setSaving(false);
-                      if (error) return showToast("Failed to save");
-                      setUser((u) => u ? { ...u, firstName, lastName, fullName } : u);
-                      showToast("Profile updated");
+                  <EnhancedImageUpload
+                    value={tempProfilePicUrl || profilePicUrl || undefined}
+                    onChange={(url: string) => {
+                      setTempProfilePicUrl(url);
+                      setProfilePicChanged(true);
                     }}
-                    className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
-                  >
-                    {saving ? "Saving…" : "Save changes"}
-                  </button>
+                    onUploadStart={() => {
+                      showToast('Uploading profile picture...');
+                    }}
+                    onUploadComplete={(url: string) => {
+                      setTempProfilePicUrl(url);
+                      setProfilePicChanged(true);
+                      showToast('Profile picture uploaded successfully! Click Update to save changes.');
+                    }}
+                    onUploadError={(error: string) => {
+                      showToast(`Upload failed: ${error}`);
+                    }}
+                    title="Profile Picture"
+                    supportedFormats="Supported formats: JPG, PNG, GIF (Max 5MB)"
+                  />
+                  
+                  {profilePicChanged && (
+                    <div className="mt-4 flex gap-3">
+                      <button
+                        onClick={async () => {
+                          if (!tempProfilePicUrl) return;
+                          
+                          setSaving(true);
+                          try {
+                            // Save to user profile in Supabase
+                            const { error } = await supabase.auth.updateUser({ 
+                              data: { profile_pic: tempProfilePicUrl } 
+                            });
+                            
+                            if (error) {
+                              showToast('Failed to update profile picture');
+                            } else {
+                              setProfilePicUrl(tempProfilePicUrl);
+                              setUser(u => u ? { ...u, profilePic: tempProfilePicUrl } : u);
+                              setProfilePicChanged(false);
+                              setTempProfilePicUrl(null);
+                              showToast('Profile picture updated successfully!');
+                            }
+                          } catch (error) {
+                            showToast('Failed to update profile picture');
+                          } finally {
+                            setSaving(false);
+                          }
+                        }}
+                        disabled={saving || !tempProfilePicUrl}
+                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+                      >
+                        {saving ? "Updating..." : "Update Profile Picture"}
+                      </button>
+                      
+                      <button
+                        onClick={() => {
+                          setTempProfilePicUrl(null);
+                          setProfilePicChanged(false);
+                        }}
+                        className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Name Section */}
+                <div>
+                  <div className="mb-2 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1">Name</div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm text-zinc-300">First name</label>
+                      <input
+                        value={firstName}
+                        onChange={(e) => setFirstName(e.target.value)}
+                        placeholder="Jane"
+                        className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-400 placeholder:text-zinc-500"
+                        readOnly={!editingName}
+                        style={!editingName ? { backgroundColor: '#23272e', cursor: 'not-allowed', color: '#888' } : {}}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm text-zinc-300">Last name</label>
+                      <input
+                        value={lastName}
+                        onChange={(e) => setLastName(e.target.value)}
+                        placeholder="Doe"
+                        className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-400 placeholder:text-zinc-500"
+                        readOnly={!editingName}
+                        style={!editingName ? { backgroundColor: '#23272e', cursor: 'not-allowed', color: '#888' } : {}}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    {!editingName ? (
+                      <button
+                        onClick={() => setEditingName(true)}
+                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700"
+                      >
+                        Edit Name
+                      </button>
+                    ) : (
+                      <button
+                        disabled={saving}
+                        onClick={async () => {
+                          setSaving(true);
+                          const fullName = [firstName, lastName].filter(Boolean).join(" ");
+                          const { error } = await supabase.auth.updateUser({
+                            data: { first_name: firstName || null, last_name: lastName || null, full_name: fullName || null },
+                          });
+                          setSaving(false);
+                          setEditingName(false);
+                          if (error) return showToast("Failed to save");
+                          setUser((u) => u ? { ...u, firstName, lastName, fullName } : u);
+                          showToast("Profile updated");
+                        }}
+                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+                      >
+                        {saving ? "Saving…" : "Save changes"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -641,7 +754,7 @@ export default function UserProfile() {
                       <div className="mt-4">
                         <button
                           disabled={passwordSaving}
-                          onClick={() => {
+                          onClick={async () => {
                             setPasswordError(null);
                             setPasswordSuccess(null);
                             const validation = validatePasswordFields();
@@ -649,6 +762,25 @@ export default function UserProfile() {
                               setPasswordError(validation);
                               return;
                             }
+                            // 1. Check old password first
+                            setPasswordSaving(true);
+                            const { data: userData, error: userError } = await supabase.auth.getUser();
+                            if (userError || !userData?.user?.email) {
+                              setPasswordSaving(false);
+                              setPasswordError("Could not get current user.");
+                              return;
+                            }
+                            const { error: signInError } = await supabase.auth.signInWithPassword({
+                              email: userData.user.email,
+                              password: oldPassword,
+                            });
+                            if (signInError) {
+                              setPasswordSaving(false);
+                              setPasswordError("Old password is incorrect.");
+                              return;
+                            }
+                            setPasswordSaving(false);
+                            // 2. If old password is correct, proceed to 2FA (if enabled)
                             require2FA(async () => {
                               setPasswordSaving(true);
                               setPasswordError(null);
@@ -708,16 +840,6 @@ export default function UserProfile() {
               </div>
             )}
 
-            {active === "keys" && (
-              <div className="space-y-6">
-                <SectionTitle icon={<KeyRound className="h-5 w-5" />} title="API keys" subtitle="Client keys available in your app runtime" />
-                <div className="space-y-3">
-                  <KeyRow label="NEXT_PUBLIC_SUPABASE_URL" value={envInfo.url} onCopy={() => showToast("URL copied")} />
-                  <KeyRow label="NEXT_PUBLIC_SUPABASE_ANON_KEY" value={envInfo.anon} onCopy={() => showToast("Anon key copied")} />
-                </div>
-                <div className="text-xs text-zinc-500">These are public client-side keys. Do not expose service role keys in the browser.</div>
-              </div>
-            )}
 
             {active === "danger" && (
               <div className="space-y-6">
