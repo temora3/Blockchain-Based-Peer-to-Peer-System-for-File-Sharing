@@ -12,7 +12,7 @@ function TwoFAModal({ open, onClose, onVerify, verifying, error }: {
   const [code, setCode] = useState("");
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 pointer-events-none">
       <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-xs shadow-xl">
         <div className="text-lg font-semibold text-zinc-100 mb-2">2FA Verification</div>
         <div className="text-sm text-zinc-400 mb-4">Enter your 6-digit code from your authenticator app.</div>
@@ -67,7 +67,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { EnhancedImageUpload } from "../../components/ui/enhanced-image-upload";
+import FileUploader from "../../components/FileUploader";
 import AuthService from "@/lib/auth";
+import { getPeerId } from "@/lib/torrent";
 import {
   LogOut,
   ShieldCheck,
@@ -247,6 +249,9 @@ export default function UserProfile() {
   const [profilePicChanged, setProfilePicChanged] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // Seeding points state (from scoring server via tracker)
+  const [peerId, setPeerId] = useState<string | null>(null);
+  const [points, setPoints] = useState<number>(0);
   // Account form state
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -285,6 +290,30 @@ export default function UserProfile() {
     }
     load();
   }, [router]);
+
+  // Initialize WebTorrent peerId and poll points
+  useEffect(() => {
+    try {
+      const id = getPeerId();
+      setPeerId(id);
+    } catch {}
+    const base = process.env.NEXT_PUBLIC_SCORING_API || 'http://localhost:4000';
+    let interval: any;
+    async function poll() {
+      try {
+        const id = getPeerId();
+        if (!id) return;
+        setPeerId(id);
+        const res = await fetch(`${base}/points/${encodeURIComponent(id)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (typeof data.points === 'number') setPoints(data.points);
+      } catch {}
+    }
+    poll();
+    interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   const envInfo = useMemo(() => {
     return {
@@ -355,7 +384,7 @@ export default function UserProfile() {
         {/* Body */}
         <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
           {/* Sidebar */}
-          <aside className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-2">
+          <aside className="rounded-2xl border-2 border-emerald-600 bg-gradient-to-b from-zinc-900 via-zinc-900 to-slate-900/90 shadow-xl p-2 backdrop-blur-lg">
             <NavItem icon={<Activity className="h-4 w-4" />} label="Overview" active={active === "overview"} onClick={() => setActive("overview")} />
             <NavItem icon={<User2 className="h-4 w-4" />} label="Account" active={active === "account"} onClick={() => setActive("account")} />
             <NavItem icon={<ShieldCheck className="h-4 w-4" />} label="Security" active={active === "security"} onClick={() => setActive("security")} />
@@ -374,6 +403,8 @@ export default function UserProfile() {
                   <InfoCard label="User ID" value={user.id} copyable />
                   <InfoCard label="Created" value={new Date(user.createdAt).toLocaleString()} />
                   <InfoCard label="Last sign in" value={user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"} />
+                  <InfoCard label="Seeding points" value={points.toFixed(0)} />
+                  <InfoCard label="Peer ID" value={peerId || "—"} copyable />
                 </div>
               </div>
             )}
@@ -898,7 +929,7 @@ export default function UserProfile() {
         </div>
 
         {toast && (
-          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-2 text-sm text-zinc-100 shadow-lg">
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-2 text-sm text-zinc-100 shadow-lg pointer-events-none">
             {toast}
           </div>
         )}
@@ -911,7 +942,12 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; labe
   return (
     <button
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm ${active ? "bg-zinc-800 text-white" : "text-zinc-300 hover:bg-zinc-800/60"}`}
+      className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-base font-medium transition-all duration-150
+        ${active
+          ? "bg-emerald-600 text-white shadow-lg border border-emerald-400 scale-[1.04]"
+          : "text-zinc-200 hover:bg-emerald-900/30 hover:text-white border border-transparent"}
+      `}
+      style={{ boxShadow: active ? '0 2px 16px 0 rgba(16, 185, 129, 0.15)' : undefined }}
     >
       {icon}
       <span>{label}</span>
