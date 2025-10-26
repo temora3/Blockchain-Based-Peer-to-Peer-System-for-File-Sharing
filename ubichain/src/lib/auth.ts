@@ -42,6 +42,18 @@ export class AuthService {
         }
       }
 
+      // Create or update profile row in Supabase
+      if (data.user) {
+        const userId = data.user.id;
+        const fullName = firstName && lastName ? `${firstName} ${lastName}` : email;
+        const { error: upsertError, data: upsertData } = await supabase.from('profiles').upsert({
+          id: userId,
+          full_name: fullName,
+          email,
+        });
+        console.log('Profile upsert result (signUp):', { upsertError, upsertData });
+      }
+
       if (data.user && !data.user.email_confirmed_at) {
         return {
           success: true,
@@ -74,6 +86,18 @@ export class AuthService {
           success: false,
           error: error.message,
         }
+      }
+
+      // Optionally update profile row in Supabase
+      if (data.user) {
+        const userId = data.user.id;
+        const fullName = data.user.user_metadata?.full_name || email;
+        const { error: upsertError, data: upsertData } = await supabase.from('profiles').upsert({
+          id: userId,
+          full_name: fullName,
+          email,
+        });
+        console.log('Profile upsert result (signIn):', { upsertError, upsertData });
       }
 
       return {

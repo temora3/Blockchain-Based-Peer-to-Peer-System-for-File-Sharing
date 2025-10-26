@@ -1,0 +1,86 @@
+{
+  "abi": [
+    {
+      "inputs": [
+        { "internalType": "address", "name": "owner", "type": "address" },
+        { "internalType": "string", "name": "name", "type": "string" },
+        { "internalType": "string", "name": "magnetURI", "type": "string" }
+      ],
+      "name": "computeFileId",
+      "outputs": [ { "internalType": "bytes32", "name": "", "type": "bytes32" } ],
+      "stateMutability": "pure",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        { "internalType": "bytes32", "name": "fileId", "type": "bytes32" }
+      ],
+      "name": "getFile",
+      "outputs": [
+        {
+          "components": [
+            { "internalType": "address", "name": "owner", "type": "address" },
+            { "internalType": "string", "name": "name", "type": "string" },
+            { "internalType": "string", "name": "magnetURI", "type": "string" },
+            { "internalType": "bytes32", "name": "contentHash", "type": "bytes32" },
+            { "internalType": "uint256", "name": "registeredAt", "type": "uint256" }
+          ],
+          "internalType": "struct FileRegistry.FileMeta",
+          "name": "",
+          "type": "tuple"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        { "internalType": "address", "name": "owner", "type": "address" },
+        { "internalType": "string", "name": "name", "type": "string" },
+        { "internalType": "string", "name": "magnetURI", "type": "string" }
+      ],
+      "name": "getByParams",
+      "outputs": [
+        {
+          "components": [
+            { "internalType": "address", "name": "owner", "type": "address" },
+            { "internalType": "string", "name": "name", "type": "string" },
+            { "internalType": "string", "name": "magnetURI", "type": "string" },
+            { "internalType": "bytes32", "name": "contentHash", "type": "bytes32" },
+            { "internalType": "uint256", "name": "registeredAt", "type": "uint256" }
+          ],
+          "internalType": "struct FileRegistry.FileMeta",
+          "name": "",
+          "type": "tuple"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        { "internalType": "string", "name": "name", "type": "string" },
+        { "internalType": "string", "name": "magnetURI", "type": "string" },
+        { "internalType": "bytes32", "name": "contentHash", "type": "bytes32" }
+      ],
+      "name": "registerFile",
+      "outputs": [ { "internalType": "bytes32", "name": "fileId", "type": "bytes32" } ],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        { "indexed": true, "internalType": "bytes32", "name": "fileId", "type": "bytes32" },
+        { "indexed": true, "internalType": "address", "name": "owner", "type": "address" },
+        { "indexed": false, "internalType": "string", "name": "name", "type": "string" },
+        { "indexed": false, "internalType": "string", "name": "magnetURI", "type": "string" },
+        { "indexed": false, "internalType": "bytes32", "name": "contentHash", "type": "bytes32" }
+      ],
+      "name": "FileRegistered",
+      "type": "event"
+    }
+  ]
+}
+
+
