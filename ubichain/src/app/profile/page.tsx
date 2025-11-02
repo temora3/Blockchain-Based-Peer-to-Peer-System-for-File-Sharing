@@ -1,6 +1,15 @@
 // 2FA Modal Prompt
 "use client";
-import React from "react";
+import React, { useState } from "react";
+import { useEffect, useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase/client";
+import { EnhancedImageUpload } from "../../components/ui/enhanced-image-upload";
+import FileUploader from "../../components/FileUploader";
+import AuthService from "@/lib/auth";
+import { getPeerId } from "@/lib/torrent";
+import { getWebTorrentClient } from '@/lib/torrent';
+import { Buffer } from 'buffer';
 
 function TwoFAModal({ open, onClose, onVerify, verifying, error }: {
   open: boolean;
@@ -63,13 +72,7 @@ function patchSvgNamespace(svg: string | null): string {
     '<svg xmlns="http://www.w3.org/2000/svg"$1'
   );
 }
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase/client";
-import { EnhancedImageUpload } from "../../components/ui/enhanced-image-upload";
-import FileUploader from "../../components/FileUploader";
-import AuthService from "@/lib/auth";
-import { getPeerId } from "@/lib/torrent";
+
 import {
   LogOut,
   ShieldCheck,
@@ -82,6 +85,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Upload,
 } from "lucide-react";
 
 type ProfileUser = {
@@ -106,6 +110,7 @@ function mask(str: string, visible: number = 4) {
 }
 
 export default function UserProfile() {
+  
   // Password visibility toggles
   const [showOldPassword, setShowOldPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -249,9 +254,11 @@ export default function UserProfile() {
   const [profilePicChanged, setProfilePicChanged] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  // Seeding points state (from scoring server via tracker)
+  // Seeding points state (client-side calculation from WebTorrent stats)
   const [peerId, setPeerId] = useState<string | null>(null);
   const [points, setPoints] = useState<number>(0);
+  const [totalUploaded, setTotalUploaded] = useState<number>(0);
+  const [totalSeedingTime, setTotalSeedingTime] = useState<number>(0);
   // Account form state
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -291,29 +298,42 @@ export default function UserProfile() {
     load();
   }, [router]);
 
-  // Initialize WebTorrent peerId and poll points
+  // Note: Seeding is now handled on the Share page. Points are calculated from WebTorrent client stats.
+
+  // Calculate points from WebTorrent client stats (seeding UI moved to Share page)
   useEffect(() => {
-    try {
-      const id = getPeerId();
-      setPeerId(id);
-    } catch {}
-    const base = process.env.NEXT_PUBLIC_SCORING_API || 'http://localhost:4000';
-    let interval: any;
-    async function poll() {
+    const interval = setInterval(() => {
       try {
-        const id = getPeerId();
-        if (!id) return;
-        setPeerId(id);
-        const res = await fetch(`${base}/points/${encodeURIComponent(id)}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (typeof data.points === 'number') setPoints(data.points);
-      } catch {}
-    }
-    poll();
-    interval = setInterval(poll, 5000);
-    return () => clearInterval(interval);
+        const client = (window as any).__webtorrentClient;
+        if (!client) return;
+        
+        const peerId = client.peerId?.toString?.('hex') || null;
+        setPeerId(peerId);
+        
+        // Calculate points from all torrents
+        const torrents = client.torrents || [];
+        let totalBytes = 0;
+        let seedingCount = 0;
+        
+        torrents.forEach((torrent: any) => {
+          totalBytes += torrent.uploaded || 0;
+          if (torrent.uploaded > 0) seedingCount++;
+        });
+        
+        // Points = uploaded bytes in KB + (10 per actively seeding torrent)
+        const calculatedPoints = Math.floor((totalBytes || 0) / 1024) + (seedingCount * 10);
+        setPoints(calculatedPoints);
+        setTotalUploaded(totalBytes);
+      } catch (err) {
+        console.error('Points calculation error:', err);
+      }
+    }, 500);
+    
+    return () => {
+      clearInterval(interval);
+    };
   }, []);
+
 
   const envInfo = useMemo(() => {
     return {
@@ -326,6 +346,7 @@ export default function UserProfile() {
     setToast(message);
     setTimeout(() => setToast(null), 2200);
   }
+
 
   if (loading) {
     return (
@@ -396,17 +417,19 @@ export default function UserProfile() {
           {/* Content */}
           <main className="min-h-[520px] rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
             {active === "overview" && (
-              <div className="space-y-6">
-                <SectionTitle icon={<Activity className="h-5 w-5" />} title="Overview" subtitle="Your account at a glance" />
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <InfoCard label="Email" value={user.email || "—"} />
-                  <InfoCard label="User ID" value={user.id} copyable />
-                  <InfoCard label="Created" value={new Date(user.createdAt).toLocaleString()} />
-                  <InfoCard label="Last sign in" value={user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"} />
-                  <InfoCard label="Seeding points" value={points.toFixed(0)} />
-                  <InfoCard label="Peer ID" value={peerId || "—"} copyable />
+              <>
+                <div className="space-y-6">
+                  <SectionTitle icon={<Activity className="h-5 w-5" />} title="Overview" subtitle="Your account at a glance" />
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <InfoCard label="Email" value={user.email || "—"} />
+                    <InfoCard label="User ID" value={user.id} copyable />
+                    <InfoCard label="Created" value={new Date(user.createdAt).toLocaleString()} />
+                    <InfoCard label="Last sign in" value={user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"} />
+                    <InfoCard label="Seeding points" value={points.toFixed(0)} />
+                    <InfoCard label="Peer ID" value={peerId || "—"} copyable />
+                  </div>
                 </div>
-              </div>
+              </>
             )}
 
             {active === "account" && (
@@ -870,6 +893,7 @@ export default function UserProfile() {
                 </div>
               </div>
             )}
+
 
 
             {active === "danger" && (

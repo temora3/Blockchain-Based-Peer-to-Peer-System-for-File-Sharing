@@ -1,55 +1,949 @@
 "use client";
 import { useState } from 'react';
+import { AnimatedDownload } from '@/components/ui/animated-download';
 import { getWebTorrentClient } from '@/lib/torrent';
 import { useRef } from 'react';
 import { useImageUpload } from '@/hooks/use-image-upload';
 import { ImagePlus } from 'lucide-react';
-// @ts-ignore
-import parseTorrent from 'parse-torrent';
 import { Buffer } from 'buffer';
+import JSZip from 'jszip';
 
 export default function DownloadPage() {
   const [magnet, setMagnet] = useState('');
   const [status, setStatus] = useState('');
-  const [files, setFiles] = useState<{ name: string; size: number; url: string }[]>([]);
+  const [downloadProgress, setDownloadProgress] = useState(0); // 0-100
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [files, setFiles] = useState<{ name: string; size: number; url: string; path?: string; blob?: Blob }[]>([]);
+  const [peerCount, setPeerCount] = useState<number>(0);
   const [torrentFile, setTorrentFile] = useState<File | null>(null);
   const { previewUrl, fileInputRef, handleFileChange, handleRemove } = useImageUpload({ onUpload: () => {} });
   const [isDragging, setIsDragging] = useState(false);
   const [dropPreview, setDropPreview] = useState<string | null>(null);
+  const [downloadSpeed, setDownloadSpeed] = useState<number>(0); // bytes per second
+  const [timeRemaining, setTimeRemaining] = useState<number>(0); // seconds
+  const [currentTorrent, setCurrentTorrent] = useState<any>(null);
+  const [isDownloadComplete, setIsDownloadComplete] = useState<boolean>(false);
+  const [fileCount, setFileCount] = useState<number>(0);
 
   // Download handler for both magnet and .torrent file
   const handleDownload = async (inputMagnet?: string, inputTorrentFile?: File) => {
     setFiles([]);
     setStatus('Connecting to peers...');
+    setPeerCount(0);
+    setDownloadProgress(0);
+    setIsDownloading(true);
+    setIsDownloadComplete(false);
     const client = await getWebTorrentClient();
     let source: string | Buffer | undefined = undefined;
+    let infoHash: string | null = null;
+    
     if (inputMagnet) {
       source = inputMagnet;
+      // Extract infoHash from magnet URI
+      const match = inputMagnet.match(/btih:([a-f0-9]+)/i);
+      if (match) infoHash = match[1];
     } else if (inputTorrentFile) {
-      const arrBuf = await inputTorrentFile.arrayBuffer();
-      source = Buffer.from(arrBuf);
+      try {
+        const arrBuf = await inputTorrentFile.arrayBuffer();
+        const torrentBuffer = Buffer.from(arrBuf);
+        
+        // Dynamically import parse-torrent to avoid SSR issues
+        // @ts-ignore
+        const parseTorrentModule = await import('parse-torrent');
+        const parseTorrent = parseTorrentModule.default || parseTorrentModule;
+        let parsed = parseTorrent(torrentBuffer);
+        
+        // Check if parseTorrent returns a Promise
+        if (parsed && typeof parsed.then === 'function') {
+          parsed = await parsed;
+        }
+        
+        // Handle infoHash extraction (can be Buffer or string)
+        let parsedInfoHash: any;
+        if (parsed && parsed.infoHash) {
+          if (Buffer.isBuffer(parsed.infoHash)) {
+            parsedInfoHash = parsed.infoHash;
+            infoHash = parsedInfoHash.toString('hex');
+          } else if (typeof parsed.infoHash === 'string') {
+            parsedInfoHash = parsed.infoHash;
+            infoHash = parsedInfoHash;
+          } else {
+            parsedInfoHash = parsed.infoHash;
+            infoHash = parsedInfoHash.toString('hex');
+          }
+        } else {
+          console.error('Parsed torrent missing infoHash:', parsed);
+          throw new Error('Failed to parse torrent infoHash');
+        }
+        
+        // Check if torrent already exists in client (use hex string infoHash)
+        // Try both hex string and Buffer formats
+        let existing: any = null;
+        if (infoHash) {
+          existing = client.get(infoHash);
+          // If not found, try finding by infoHash in client.torrents array
+          if (!existing || typeof existing.on !== 'function') {
+            const torrents = client.torrents || [];
+            existing = torrents.find((t: any) => {
+              const tHash = Buffer.isBuffer(t.infoHash) 
+                ? t.infoHash.toString('hex') 
+                : (typeof t.infoHash === 'string' ? t.infoHash : String(t.infoHash));
+              return tHash.toLowerCase() === (infoHash || '').toLowerCase();
+            });
+          }
+        }
+        
+        if (existing && typeof existing.on === 'function') {
+          setStatus('Torrent is already being seeded/downloaded. Using existing instance.');
+          setIsDownloading(true); // Keep as downloading to show progress
+          
+          // Set up listeners for existing torrent
+          setCurrentTorrent(existing);
+          setFileCount(existing.files?.length || 0);
+          
+          // Track if files have been successfully extracted to prevent status overwrites
+          let filesExtracted = false;
+          
+          // Helper function to update progress and stats
+          const updateExistingProgress = () => {
+            // Don't overwrite status if files are already extracted
+            if (filesExtracted) return;
+            
+            const progress = Math.round((existing.progress || 0) * 100);
+            const speed = existing.downloadSpeed || 0;
+            const downloaded = (existing.downloaded || 0);
+            const length = existing.length || 1;
+            const remaining = length - downloaded;
+            
+            setDownloadProgress(progress);
+            setDownloadSpeed(speed);
+            setPeerCount(existing.wires?.length || existing.numPeers || 0);
+            
+            // Calculate estimated time remaining
+            if (speed > 0 && remaining > 0) {
+              const estimatedSeconds = Math.ceil(remaining / speed);
+              setTimeRemaining(estimatedSeconds);
+            } else {
+              setTimeRemaining(0);
+            }
+            
+            // Update status based on progress
+            if (progress === 100) {
+              setStatus('Download complete! Extracting files...');
+            } else if (progress > 0) {
+              setStatus(`Downloading... ${progress}%`);
+            } else if (existing.numPeers > 0) {
+              setStatus(`Connected to ${existing.numPeers} peer${existing.numPeers !== 1 ? 's' : ''}, waiting for data...`);
+            } else {
+              setStatus('Searching for peers...');
+            }
+          };
+          
+          // Helper to extract files from existing torrent
+          const extractExistingFiles = async () => {
+            if (!existing.files || existing.files.length === 0) {
+              console.log('No files found in existing torrent');
+              return;
+            }
+            
+            // Only extract if torrent is complete
+            const progress = existing.progress || 0;
+            if (progress < 1) {
+              console.log(`Torrent not complete yet (${Math.round(progress * 100)}%), waiting for completion...`);
+              return;
+            }
+            
+            try {
+              console.log(`Extracting ${existing.files.length} file(s) from existing torrent...`);
+              setStatus('Extracting files...');
+              
+              const fileObjs = await Promise.all(
+                existing.files.map(async (f: any, index: number) => {
+                  try {
+                    let blob: Blob;
+                    if (f.getBlob && typeof f.getBlob === 'function') {
+                      // WebTorrent's getBlob uses callback
+                      blob = await new Promise<Blob>((resolve, reject) => {
+                        f.getBlob((err: any, result: Blob) => {
+                          if (err) {
+                            console.error(`Error getting blob for file ${index + 1} (${f.name}):`, err);
+                            reject(err);
+                          } else {
+                            console.log(`Successfully got blob for file ${index + 1} (${f.name}), size: ${result.size} bytes`);
+                            resolve(result);
+                          }
+                        });
+                      });
+                    } else if (f.blob && typeof f.blob === 'function') {
+                      blob = await f.blob();
+                    } else {
+                      throw new Error('No blob method available');
+                    }
+                    
+                    if (!blob || blob.size === 0) {
+                      throw new Error(`Blob for ${f.name} is empty`);
+                    }
+                    
+                    const url = URL.createObjectURL(blob);
+                    // Preserve folder structure - WebTorrent files have path property
+                    const filePath = f.path || f.name || 'file';
+                    return { 
+                      name: f.name || 'file', 
+                      size: f.length || 0, 
+                      url,
+                      path: filePath, // Full path including folder structure
+                      blob: blob // Store the blob directly for ZIP creation
+                    };
+                  } catch (err: any) {
+                    console.error(`Failed to extract file ${index + 1} (${f.name}):`, err);
+                    throw err;
+                  }
+                })
+              );
+              
+              console.log(`Successfully extracted ${fileObjs.length} file(s), setting files in state...`);
+              setFiles(fileObjs);
+              filesExtracted = true;
+              setIsDownloadComplete(true);
+              setIsDownloading(false);
+              
+              if (fileObjs.length > 0) {
+                setStatus(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} ready to download.`);
+                console.log(`Files state updated, should see download buttons now`);
+              }
+            } catch (err: any) {
+              console.error('Error getting files from existing torrent:', err);
+              setStatus(`Error extracting files: ${err.message || 'Unknown error'}. Try the "Extract Files" button below.`);
+            }
+          };
+          
+          // Initial progress update
+          updateExistingProgress();
+          
+          existing.on('wire', () => {
+            updateExistingProgress();
+          });
+          existing.on('noPeers', () => {
+            updateExistingProgress();
+          });
+          existing.on('download', () => {
+            updateExistingProgress();
+          });
+          existing.on('upload', () => {
+            updateExistingProgress();
+          });
+          
+          existing.on('done', () => {
+            console.log('Existing torrent done event fired');
+            setDownloadProgress(100);
+            setDownloadSpeed(0);
+            setTimeRemaining(0);
+            setIsDownloadComplete(true);
+            
+            // Extract files when download is complete
+            extractExistingFiles().catch((err) => {
+              console.error('Error in extractExistingFiles on done event:', err);
+              setIsDownloading(false);
+            });
+          });
+          
+          // Periodic progress updates for existing torrent
+          const existingProgressInterval = setInterval(() => {
+            if (existing && !existing.destroyed) {
+              updateExistingProgress();
+              
+              // Try to extract files if complete but not yet extracted
+              if (!filesExtracted && (existing.progress >= 1 || existing.done)) {
+                extractExistingFiles();
+              }
+            } else {
+              clearInterval(existingProgressInterval);
+            }
+          }, 500);
+          
+          // Clean up interval when torrent is destroyed
+          existing.on('destroy', () => {
+            clearInterval(existingProgressInterval);
+          });
+          
+          // Check if torrent is already complete and extract files
+          if (existing.progress >= 1 || existing.done) {
+            console.log('Existing torrent is already complete, extracting files...');
+            setIsDownloadComplete(true);
+            extractExistingFiles();
+          } else {
+            // Try to extract immediately (might fail if not complete, but worth trying)
+            extractExistingFiles();
+          }
+          
+          return;
+        }
+        
+        source = torrentBuffer;
+      } catch (err) {
+        console.error('Error parsing torrent file:', err);
+        setStatus('Failed to parse .torrent file.');
+        setIsDownloading(false);
+        return;
+      }
     }
-    if (!source) return;
-    client.add(source, (torrent: any) => {
-      setStatus('Downloading...');
-      torrent.on('download', () => {
-        const progress = (torrent.progress * 100).toFixed(1);
-        setStatus(`Downloading... ${progress}%`);
+    
+    if (!source) {
+      setStatus('No valid source provided.');
+      setIsDownloading(false);
+      return;
+    }
+    
+    try {
+      console.log('=== DOWNLOAD PROCESS STARTED ===');
+      console.log('Source type:', inputMagnet ? 'Magnet URI' : inputTorrentFile ? '.torrent file' : 'Unknown');
+      if (inputMagnet) {
+        console.log('Magnet URI:', inputMagnet.substring(0, 100) + '...');
+      }
+      
+      client.add(source, (torrent: any) => {
+        const infoHash = torrent.infoHash?.toString?.('hex') || torrent.infoHash;
+        console.log('=== TORRENT ADDED TO CLIENT ===');
+        console.log('InfoHash:', infoHash);
+        console.log('Torrent name:', torrent.name || 'Unknown');
+        console.log('Torrent length:', torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown');
+        
+        // Check if this torrent is already being seeded in the same client
+        const allTorrents = client.torrents || [];
+        const seedingInstance = allTorrents.find((t: any) => {
+          const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+          return tHash === infoHash && t !== torrent && (t.uploaded > 0 || t.done);
+        });
+        
+        console.log('Initial state:', {
+          files: torrent.files?.length || 0,
+          numPeers: torrent.numPeers || 0,
+          progress: Math.round((torrent.progress || 0) * 100) + '%',
+          downloaded: torrent.downloaded ? `${(torrent.downloaded / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+          uploadSpeed: torrent.uploadSpeed ? `${(torrent.uploadSpeed / 1024).toFixed(2)} KB/s` : '0 KB/s',
+          downloadSpeed: torrent.downloadSpeed ? `${(torrent.downloadSpeed / 1024).toFixed(2)} KB/s` : '0 KB/s',
+          alreadySeeding: seedingInstance ? 'Yes (in same client)' : 'No'
+        });
+        
+        if (seedingInstance) {
+          console.log('ℹ️ NOTE: This torrent is already being seeded in this client. If download doesn\'t start, you may need to seed from Profile → Seeding page.');
+        } else {
+          console.log('⚠️ NOTE: No seeders detected in this client. Make sure someone is seeding this torrent (go to Profile → Seeding to seed it).');
+        }
+        
+        setCurrentTorrent(torrent);
+        setStatus('Connecting to peers...');
+        setPeerCount(torrent.wires?.length || torrent.numPeers || 0);
+        setDownloadProgress(0);
+        setDownloadSpeed(0);
+        setTimeRemaining(0);
+        setFileCount(torrent.files?.length || 0);
+        
+        let lastProgressLog = 0;
+        let lastPeerCount = 0;
+        let progressUpdateCount = 0;
+        
+        // Helper function to update progress and stats
+        const updateProgress = (source: string = 'periodic') => {
+          progressUpdateCount++;
+          
+          // Always calculate total length from files if available - this is more accurate than torrent.length
+          // torrent.length might be incorrect or represent metadata size only
+          let length = 0;
+          let lengthSource = 'unknown';
+          
+          if (torrent.files && torrent.files.length > 0) {
+            // Calculate from files array - this is the actual file content size
+            const filesLength = torrent.files.reduce((sum: number, f: any) => sum + (f.length || 0), 0);
+            if (filesLength > 0) {
+              length = filesLength;
+              lengthSource = 'calculated from files';
+              // Only log once or when significant
+              if (progressUpdateCount === 1 || progressUpdateCount % 40 === 0) {
+                console.log(`📏 Using total length from files: ${(length / 1024 / 1024).toFixed(2)} MB (from ${torrent.files.length} files)`);
+                console.log(`  Individual file sizes (raw bytes and MB):`, torrent.files.map((f: any) => ({
+                  name: f.name,
+                  path: f.path || 'N/A',
+                  lengthBytes: f.length || 0,
+                  lengthMB: f.length ? `${(f.length / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+                  offset: f.offset || 'N/A'
+                })));
+                console.log(`  Sum check: ${torrent.files.reduce((sum: number, f: any) => sum + (f.length || 0), 0)} bytes`);
+              }
+            } else {
+              // Fall back to torrent.length if files have no length yet
+              length = torrent.length || 0;
+              lengthSource = torrent.length ? 'torrent.length (files not ready)' : 'unknown';
+            }
+          } else {
+            // No files available yet, use torrent.length
+            length = torrent.length || 0;
+            lengthSource = torrent.length ? 'torrent.length (no files)' : 'unknown';
+          }
+          
+          // Use 1 as minimum to avoid division by zero, but track if length is actually unknown
+          const effectiveLength = length || 1;
+          
+          // Get downloaded amount first
+          const speed = torrent.downloadSpeed || 0;
+          const uploaded = (torrent.uploaded || 0);
+          const downloaded = (torrent.downloaded || 0);
+          const remaining = effectiveLength > 1 ? (effectiveLength - downloaded) : 0;
+          
+          // Calculate progress - prefer manual calculation from downloaded/length when we have files
+          // torrent.progress might be 0 or incorrect when torrent.length is wrong
+          let progress = 0;
+          
+          if (effectiveLength > 1 && downloaded >= 0) {
+            // Always calculate progress manually when we have a valid length
+            // This is more reliable than torrent.progress when torrent.length is incorrect
+            progress = Math.min(100, Math.round((downloaded / effectiveLength) * 100));
+          } else if (torrent.progress !== undefined && torrent.progress !== null && !isNaN(torrent.progress) && torrent.progress > 0) {
+            // Fall back to torrent.progress only if manual calculation isn't possible
+            progress = Math.round((torrent.progress || 0) * 100);
+          }
+          
+          // Log progress calculation method occasionally, or when progress changes
+          if (progressUpdateCount === 1 || 
+              (progressUpdateCount % 40 === 0) || 
+              (progress > 0 && progress !== lastProgressLog)) {
+            // Check piece status
+            const pieces = torrent.pieces || [];
+            const completedPieces = pieces.filter((p: any) => p && p.length === (p.pieceLength || 0)).length || 
+                                   pieces.filter((p: any) => p && p.complete).length ||
+                                   torrent.numPieces || 0;
+            const totalPieces = torrent.pieces?.length || torrent.numPieces || 0;
+            
+            // Check if any peers have pieces
+            const wires = torrent.wires || [];
+            const peersWithPieces = wires.filter((w: any) => w.peerPieces && w.peerPieces.length > 0).length;
+            
+            console.log('📈 Progress calculation:', {
+              torrentProgress: torrent.progress || 0,
+              calculatedProgress: effectiveLength > 1 ? `${Math.round((downloaded / effectiveLength) * 100)}%` : 'N/A',
+              finalProgress: `${progress}%`,
+              downloaded: `${downloaded} bytes`,
+              downloadedKB: `${(downloaded / 1024).toFixed(3)} KB`,
+              effectiveLength: `${effectiveLength} bytes`,
+              effectiveLengthKB: `${(effectiveLength / 1024).toFixed(3)} KB`,
+              remaining: `${remaining} bytes`,
+              isComplete: (effectiveLength > 1 && downloaded >= effectiveLength * 0.99) || progress >= 100 || torrent.done,
+              piecesCompleted: `${completedPieces}/${totalPieces}`,
+              peersWithPieces: `${peersWithPieces}/${wires.length}`,
+              amInterested: wires.some((w: any) => w.amInterested),
+              peerChoking: wires.some((w: any) => !w.peerChoking)
+            });
+          }
+          const numPeers = torrent.wires?.length || torrent.numPeers || 0;
+          const numWires = torrent.wires?.length || 0;
+          
+          // Log length calculation debug info
+          if (progressUpdateCount === 1 || (progressUpdateCount % 40 === 0 && length <= 1)) {
+            console.log('🔍 Length Debug:', {
+              lengthSource: lengthSource,
+              torrentLength: torrent.length || 0,
+              calculatedLength: length || 0,
+              effectiveLength: effectiveLength,
+              filesCount: torrent.files?.length || 0,
+              filesLengths: torrent.files?.map((f: any) => ({ 
+                name: f.name,
+                path: f.path || 'N/A',
+                lengthBytes: f.length || 0,
+                sizeMB: f.length ? `${(f.length / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+                offset: f.offset || 'N/A'
+              })).slice(0, 5) || [],
+              downloaded: downloaded,
+              downloadedMB: `${(downloaded / 1024 / 1024).toFixed(2)} MB`,
+              progressRaw: torrent.progress || 0,
+              progressCalculated: effectiveLength > 1 ? `${Math.round((downloaded / effectiveLength) * 100)}%` : 'N/A'
+            });
+          }
+          
+          // Log significant progress changes (every 5% or every 10 seconds)
+          const shouldLog = progress !== lastProgressLog || 
+                           numPeers !== lastPeerCount || 
+                           progressUpdateCount % 20 === 0; // Every 10 seconds (20 * 500ms)
+          
+          if (shouldLog || source !== 'periodic') {
+            console.log(`[${new Date().toLocaleTimeString()}] 📊 Progress Update (${source}):`, {
+              progress: `${progress}%`,
+              downloaded: `${(downloaded / 1024 / 1024).toFixed(2)} MB`,
+              total: `${(effectiveLength / 1024 / 1024).toFixed(2)} MB`,
+              totalSource: lengthSource,
+              torrentLength: torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+              remaining: `${(remaining / 1024 / 1024).toFixed(2)} MB`,
+              downloadSpeed: speed ? `${(speed / 1024).toFixed(2)} KB/s` : '0 KB/s',
+              uploadSpeed: torrent.uploadSpeed ? `${(torrent.uploadSpeed / 1024).toFixed(2)} KB/s` : '0 KB/s',
+              peers: numPeers,
+              wires: numWires,
+              uploaded: `${(uploaded / 1024 / 1024).toFixed(2)} MB`,
+              done: torrent.done ? 'Yes' : 'No',
+              progressRaw: torrent.progress || 0
+            });
+            lastProgressLog = progress;
+            lastPeerCount = numPeers;
+          }
+          
+          setDownloadProgress(progress);
+          setDownloadSpeed(speed);
+          setPeerCount(numPeers);
+          
+          // Calculate estimated time remaining
+          if (speed > 0 && remaining > 0) {
+            const estimatedSeconds = Math.ceil(remaining / speed);
+            setTimeRemaining(estimatedSeconds);
+          } else {
+            setTimeRemaining(0);
+          }
+          
+          // Check if peers have pieces (i.e., if anyone is seeding)
+          const wires = torrent.wires || [];
+          const peersWithPieces = wires.filter((w: any) => w.peerPieces && w.peerPieces.length > 0).length;
+          const unchokedPeers = wires.filter((w: any) => !w.peerChoking).length;
+          
+          // Update status based on progress
+          if (progress === 100) {
+            setStatus('Download complete! Extracting files...');
+          } else if (progress > 0) {
+            setStatus(`Downloading... ${progress}%`);
+          } else if (numPeers > 0) {
+            if (peersWithPieces === 0) {
+              setStatus(`⚠️ Connected to ${numPeers} peer${numPeers !== 1 ? 's' : ''}, but no seeders available. Someone needs to seed this torrent first (Profile → Seeding).`);
+            } else if (unchokedPeers === 0) {
+              setStatus(`Connected to ${numPeers} peer${numPeers !== 1 ? 's' : ''}, but all peers are choking (${peersWithPieces} seeder${peersWithPieces !== 1 ? 's' : ''} found, waiting to unchoke)...`);
+            } else {
+              setStatus(`Connected to ${numPeers} peer${numPeers !== 1 ? 's' : ''} (${peersWithPieces} seeder${peersWithPieces !== 1 ? 's' : ''}), negotiating data transfer...`);
+            }
+          } else {
+            setStatus('Searching for peers...');
+          }
+          
+          // Log seeder status occasionally
+          if (progressUpdateCount % 40 === 0 && numPeers > 0 && downloaded === 0) {
+            console.warn('⚠️ NO DATA TRANSFER:', {
+              peers: numPeers,
+              peersWithPieces: peersWithPieces,
+              unchokedPeers: unchokedPeers,
+              downloaded: downloaded,
+              message: peersWithPieces === 0 
+                ? 'No seeders available - someone needs to seed this torrent first' 
+                : unchokedPeers === 0 
+                  ? 'Peers are choking - waiting for unchoke'
+                  : 'Data transfer not starting despite having unchoked peers'
+            });
+          }
+        };
+        
+        // Initial progress update
+        updateProgress('initial');
+        
+        // Update peer count when a new peer connects
+        torrent.on('wire', (wire: any) => {
+          console.log('🔌 Peer connected!', {
+            remoteAddress: wire.remoteAddress || 'Unknown',
+            remotePort: wire.remotePort || 'Unknown',
+            peerId: wire.peerId?.toString?.('hex')?.substring(0, 16) || 'Unknown',
+            totalPeers: torrent.wires?.length || torrent.numPeers || 0,
+            amChoking: wire.amChoking,
+            amInterested: wire.amInterested,
+            peerChoking: wire.peerChoking,
+            peerInterested: wire.peerInterested,
+            peerPieces: wire.peerPieces ? `Has ${wire.peerPieces.length} pieces` : 'Unknown pieces',
+            downloadedFromPeer: wire.downloaded || 0,
+            uploadedToPeer: wire.uploaded || 0
+          });
+          
+          // Monitor this wire for data transfer
+          let lastDownloaded = wire.downloaded || 0;
+          let lastUploaded = wire.uploaded || 0;
+          
+          const wireMonitor = setInterval(() => {
+            const currentDownloaded = wire.downloaded || 0;
+            const currentUploaded = wire.uploaded || 0;
+            
+            if (currentDownloaded !== lastDownloaded || currentUploaded !== lastUploaded) {
+              console.log(`📡 Wire data transfer (peer ${wire.peerId?.toString?.('hex')?.substring(0, 8)}):`, {
+                downloadedChange: `${currentDownloaded - lastDownloaded} bytes`,
+                uploadedChange: `${currentUploaded - lastUploaded} bytes`,
+                totalDownloaded: `${currentDownloaded} bytes`,
+                totalUploaded: `${currentUploaded} bytes`,
+                amChoking: wire.amChoking,
+                peerChoking: wire.peerChoking,
+                peerHasPieces: wire.peerPieces ? wire.peerPieces.length : 0
+              });
+              lastDownloaded = currentDownloaded;
+              lastUploaded = currentUploaded;
+            }
+          }, 1000); // Check every second
+          
+          // Clean up monitor when wire closes
+          wire.on('close', () => {
+            clearInterval(wireMonitor);
+          });
+          
+          updateProgress('peer-connect');
+        });
+        
+        // Also update peer count if a peer disconnects
+        torrent.on('noPeers', (announceType: string) => {
+          console.log('⚠️ No peers event:', announceType);
+          updateProgress('no-peers');
+        });
+        
+        // Update on download events
+        torrent.on('download', () => {
+          updateProgress('download-event');
+        });
+        
+        // Update on upload events (can indicate connection is active)
+        torrent.on('upload', () => {
+          updateProgress('upload-event');
+        });
+        
+          // Update when torrent is ready/metadata downloaded
+        torrent.on('ready', () => {
+          console.log('✅ Torrent ready - metadata downloaded');
+          const filesTotal = torrent.files?.reduce((sum: number, f: any) => sum + (f.length || 0), 0) || 0;
+          const fileCount = torrent.files?.length || 0;
+          setFileCount(fileCount);
+          console.log('Metadata state:', {
+            files: fileCount,
+            torrentLength: torrent.length || 0,
+            torrentLengthMB: torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+            filesTotal: filesTotal,
+            filesTotalMB: filesTotal ? `${(filesTotal / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+            fileDetails: torrent.files?.map((f: any) => ({
+              name: f.name,
+              path: f.path || 'N/A',
+              lengthBytes: f.length || 0,
+              lengthMB: f.length ? `${(f.length / 1024 / 1024).toFixed(2)} MB` : '0 MB'
+            })).slice(0, 5) || [],
+            progress: Math.round((torrent.progress || 0) * 100) + '%'
+          });
+          updateProgress('ready-event');
+        });
+        
+        // Update on any progress change
+        torrent.on('metadata', () => {
+          console.log('📋 Torrent metadata received');
+          setFileCount(torrent.files?.length || 0);
+          updateProgress('metadata-event');
+        });
+        
+        torrent.on('error', (err: any) => {
+          console.error('❌ Torrent error:', {
+            message: err.message || 'Unknown error',
+            stack: err.stack,
+            torrentInfoHash: torrent.infoHash?.toString?.('hex') || 'Unknown'
+          });
+        });
+        
+        torrent.on('warning', (err: any) => {
+          console.warn('⚠️ Torrent warning:', {
+            message: err.message || 'Unknown warning',
+            torrentInfoHash: torrent.infoHash?.toString?.('hex') || 'Unknown'
+          });
+        });
+        
+        // Track if files have been successfully extracted to prevent multiple attempts
+        let filesExtracted = false;
+        
+        // Get files when torrent is ready - but only extract if download is complete
+        const getFilesFromTorrent = async (torrentFiles: any[]) => {
+          console.log('=== FILE EXTRACTION ATTEMPT ===');
+          console.log('Files to extract:', torrentFiles.length);
+          console.log('File list:', torrentFiles.map((f: any, i: number) => ({
+            index: i + 1,
+            name: f.name || 'Unknown',
+            size: f.length ? `${(f.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown',
+            path: f.path || f.name || 'Unknown'
+          })));
+          
+          // Don't extract if already extracted or if torrent isn't complete
+          if (filesExtracted) {
+            console.log('⏭️ Files already extracted, skipping...');
+            return;
+          }
+          
+          // Calculate total length from files if torrent.length is not available
+          let totalLength = torrent.length || 0;
+          if (!totalLength && torrentFiles && torrentFiles.length > 0) {
+            totalLength = torrentFiles.reduce((sum: number, f: any) => sum + (f.length || 0), 0);
+          }
+          
+          const downloaded = torrent.downloaded || 0;
+          const progressRaw = torrent.progress || 0;
+          const progressCalculated = totalLength > 0 ? (downloaded / totalLength) : 0;
+          const progress = Math.max(progressRaw, progressCalculated);
+          
+          // Use appropriate units based on file size
+          const sizeUnit = totalLength < 1024 ? 'bytes' : (totalLength < 1024 * 1024 ? 'KB' : 'MB');
+          const formatSize = (bytes: number) => {
+            if (sizeUnit === 'bytes') return `${bytes} bytes`;
+            if (sizeUnit === 'KB') return `${(bytes / 1024).toFixed(2)} KB`;
+            return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+          };
+          
+          console.log('Torrent completion check:', {
+            progressRaw: `${Math.round(progressRaw * 100)}%`,
+            progressCalculated: totalLength > 0 ? `${Math.round(progressCalculated * 100)}%` : 'N/A',
+            progressFinal: `${Math.round(progress * 100)}%`,
+            done: torrent.done ? 'Yes' : 'No',
+            downloadedBytes: downloaded,
+            downloadedFormatted: formatSize(downloaded),
+            totalLengthBytes: totalLength,
+            totalLengthFormatted: formatSize(totalLength),
+            remaining: totalLength - downloaded,
+            torrentLength: torrent.length || 0
+          });
+          
+          // For very small files (< 1KB), use 100% match or allow exact match
+          // For larger files, use 99% threshold to account for rounding
+          const completionThreshold = totalLength < 1024 ? 1.0 : 0.99;
+          const isComplete = torrent.done || 
+                             progress >= 1 || 
+                             (totalLength > 0 && downloaded >= totalLength * completionThreshold) ||
+                             (totalLength > 0 && totalLength < 1024 && downloaded >= totalLength - 1); // Allow 1 byte difference for tiny files
+          
+          if (!isComplete) {
+            console.log(`⏸️ Torrent not complete yet (${Math.round(progress * 100)}%), cannot extract files`);
+            console.log(`  Downloaded: ${formatSize(downloaded)} / ${formatSize(totalLength)}`);
+            console.log(`  Remaining: ${totalLength - downloaded} bytes`);
+            console.log(`  Threshold: ${completionThreshold * 100}%`);
+            console.log('Waiting for completion...');
+            return;
+          }
+          
+          try {
+            console.log(`🔧 Starting extraction of ${torrentFiles.length} file(s) from torrent (progress: ${Math.round(progress * 100)}%)...`);
+            setStatus('Extracting files...');
+            
+            const extractionStartTime = Date.now();
+            console.log('📦 Beginning file blob extraction...');
+            
+            const fileObjs = await Promise.all(
+              torrentFiles.map(async (f: any, index: number) => {
+                const fileStartTime = Date.now();
+                console.log(`[${index + 1}/${torrentFiles.length}] Extracting file: ${f.name}`);
+                console.log(`  Size: ${f.length ? `${(f.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown'}`);
+                console.log(`  Path: ${f.path || f.name || 'Unknown'}`);
+                
+                try {
+                  let blob: Blob;
+                  if (f.getBlob && typeof f.getBlob === 'function') {
+                    console.log(`  Method: getBlob (callback-based)`);
+                    // WebTorrent's getBlob uses callback
+                    blob = await new Promise<Blob>((resolve, reject) => {
+                      const blobStartTime = Date.now();
+                      f.getBlob((err: any, result: Blob) => {
+                        if (err) {
+                          console.error(`  ❌ Error getting blob for file ${index + 1} (${f.name}):`, err);
+                          reject(err);
+                        } else {
+                          const duration = ((Date.now() - blobStartTime) / 1000).toFixed(2);
+                          console.log(`  ✅ Successfully got blob for file ${index + 1} (${f.name})`);
+                          console.log(`  Blob size: ${result.size ? `${(result.size / 1024 / 1024).toFixed(2)} MB` : '0 MB'}`);
+                          console.log(`  Blob type: ${result.type || 'Unknown'}`);
+                          console.log(`  Extraction time: ${duration}s`);
+                          resolve(result);
+                        }
+                      });
+                    });
+                  } else if (f.blob && typeof f.blob === 'function') {
+                    console.log(`  Method: blob() (promise-based)`);
+                    blob = await f.blob();
+                  } else {
+                    throw new Error('No blob method available');
+                  }
+                  
+                  if (!blob || blob.size === 0) {
+                    console.error(`  ❌ Blob is empty or invalid for ${f.name}`);
+                    throw new Error(`Blob for ${f.name} is empty`);
+                  }
+                  
+                  if (blob.size !== f.length) {
+                    console.warn(`  ⚠️ Blob size mismatch: expected ${f.length}, got ${blob.size}`);
+                  }
+                  
+                  const url = URL.createObjectURL(blob);
+                  // Preserve folder structure - WebTorrent files have path property
+                  const filePath = f.path || f.name || 'file';
+                  const fileDuration = ((Date.now() - fileStartTime) / 1000).toFixed(2);
+                  console.log(`  ✅ File ${index + 1} ready (took ${fileDuration}s)`);
+                  
+                  return { 
+                    name: f.name || 'file', 
+                    size: f.length || 0, 
+                    url,
+                    path: filePath, // Full path including folder structure
+                    blob: blob // Store the blob directly for ZIP creation
+                  };
+                } catch (err: any) {
+                  console.error(`  ❌ Failed to extract file ${index + 1} (${f.name}):`, err);
+                  throw err;
+                }
+              })
+            );
+            
+            const totalDuration = ((Date.now() - extractionStartTime) / 1000).toFixed(2);
+            console.log(`✅ Successfully extracted ${fileObjs.length} file(s) in ${totalDuration}s`);
+            console.log('=== EXTRACTION SUMMARY ===');
+            console.log('Extracted files:', fileObjs.map((f, i) => ({
+              index: i + 1,
+              name: f.name,
+              size: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
+              path: f.path,
+              url: f.url.substring(0, 50) + '...'
+            })));
+            
+            console.log('🔄 Setting files in React state...');
+            setFiles(fileObjs);
+            filesExtracted = true;
+            setIsDownloadComplete(true);
+            setIsDownloading(false);
+            
+            if (fileObjs.length > 0) {
+              setStatus(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} ready to download.`);
+              console.log(`✅ Files state updated! Download buttons should appear now.`);
+              console.log('=== FILE EXTRACTION COMPLETE ===');
+            }
+          } catch (err: any) {
+            console.error('❌ Error getting files from torrent:', err);
+            console.error('Error details:', {
+              message: err.message,
+              stack: err.stack,
+              name: err.name
+            });
+            setStatus(`Error extracting files: ${err.message || 'Unknown error'}. Try the "Extract Files" button below.`);
+          }
+        };
+        
+        // When torrent metadata is ready (not download complete, just metadata)
+        torrent.on('ready', () => {
+          console.log('Torrent ready, metadata downloaded (progress:', Math.round((torrent.progress || 0) * 100), '%)');
+          updateProgress();
+          // Don't extract here - wait for download to complete
+        });
+        
+        torrent.on('metadata', () => {
+          console.log('Torrent metadata received');
+          updateProgress();
+        });
+        
+        // Periodic progress updates (every 500ms) - this ensures progress updates even if events don't fire
+        // Also checks if torrent completed and triggers extraction
+        let intervalCount = 0;
+        const progressInterval = setInterval(() => {
+          intervalCount++;
+          if (torrent && !torrent.destroyed) {
+            updateProgress('periodic');
+            
+            // Try to extract files if complete but not yet extracted
+            // Calculate length from files if needed
+            let totalLength = torrent.length || 0;
+            if (!totalLength && torrent.files && torrent.files.length > 0) {
+              totalLength = torrent.files.reduce((sum: number, f: any) => sum + (f.length || 0), 0);
+            }
+            const downloaded = torrent.downloaded || 0;
+            
+            // For very small files (< 1KB), use 100% match or allow exact match
+            // For larger files, use 99% threshold to account for rounding
+            const completionThreshold = totalLength < 1024 ? 1.0 : 0.99;
+            const isComplete = torrent.done || 
+                               torrent.progress >= 1 || 
+                               (totalLength > 0 && downloaded >= totalLength * completionThreshold) ||
+                               (totalLength > 0 && totalLength < 1024 && downloaded >= totalLength - 1); // Allow 1 byte difference for tiny files
+            
+            if (!filesExtracted && torrent.files && torrent.files.length > 0 && isComplete) {
+              const sizeUnit = totalLength < 1024 ? 'bytes' : (totalLength < 1024 * 1024 ? 'KB' : 'MB');
+              const formatSize = (bytes: number) => {
+                if (sizeUnit === 'bytes') return `${bytes} bytes`;
+                if (sizeUnit === 'KB') return `${(bytes / 1024).toFixed(2)} KB`;
+                return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+              };
+              
+              console.log('🎯 Torrent completed detected in periodic check (interval #' + intervalCount + ')');
+              console.log('Completion details:', {
+                progress: `${Math.round((torrent.progress || 0) * 100)}%`,
+                progressCalculated: totalLength > 0 ? `${Math.round((downloaded / totalLength) * 100)}%` : 'N/A',
+                done: torrent.done ? 'Yes' : 'No',
+                files: torrent.files.length,
+                downloadedBytes: downloaded,
+                downloadedFormatted: formatSize(downloaded),
+                totalLengthBytes: totalLength,
+                totalLengthFormatted: formatSize(totalLength),
+                threshold: `${completionThreshold * 100}%`
+              });
+              getFilesFromTorrent(torrent.files);
+            }
+          } else {
+            console.log('⏹️ Progress interval stopped (torrent destroyed or null)');
+            clearInterval(progressInterval);
+          }
+        }, 500);
+        
+        // Clean up interval when torrent is destroyed
+        torrent.on('destroy', () => {
+          console.log('🗑️ Torrent destroyed, cleaning up...');
+          clearInterval(progressInterval);
+        });
+        
+        // Extract files when download completes
+        torrent.on('done', () => {
+          console.log('=== DOWNLOAD COMPLETE EVENT ===');
+          console.log('Torrent is 100% complete!');
+          const finalStats = {
+            progress: `${Math.round((torrent.progress || 0) * 100)}%`,
+            downloaded: torrent.downloaded ? `${(torrent.downloaded / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+            uploaded: torrent.uploaded ? `${(torrent.uploaded / 1024 / 1024).toFixed(2)} MB` : '0 MB',
+            files: torrent.files?.length || 0,
+            numPeers: torrent.numPeers || 0,
+            done: torrent.done ? 'Yes' : 'No'
+          };
+          console.log('Final stats:', finalStats);
+          
+          setDownloadProgress(100);
+          setDownloadSpeed(0);
+          setTimeRemaining(0);
+          setIsDownloadComplete(true);
+          
+          // Extract files when download is complete
+          if (torrent.files && torrent.files.length > 0) {
+            console.log(`📥 Starting file extraction for ${torrent.files.length} file(s)...`);
+            getFilesFromTorrent(torrent.files).then(() => {
+              console.log('✅ File extraction completed successfully from done event');
+              setStatus('Download complete! Files ready.');
+            }).catch((err) => {
+              console.error('❌ Error extracting files after download:', err);
+              console.error('Error stack:', err.stack);
+              setStatus('Download complete, but had trouble extracting files. Try the "Extract Files" button below.');
+            });
+          } else {
+            console.warn('⚠️ Download complete but no files found in torrent');
+            setStatus('Download complete, but no files found.');
+            setIsDownloading(false);
+          }
+        });
       });
-      torrent.on('done', () => {
-        setStatus('Download complete. Seeding to earn points...');
+    } catch (err: any) {
+      console.error('=== ERROR ADDING TORRENT ===');
+      console.error('Error details:', {
+        message: err.message || 'Unknown error',
+        name: err.name || 'Error',
+        stack: err.stack,
+        source: inputMagnet ? 'Magnet URI' : inputTorrentFile ? '.torrent file' : 'Unknown'
       });
-      (async () => {
-        const fileObjs = await Promise.all(
-          torrent.files.map(async (f: any) => {
-            const blob = await f.blob();
-            const url = URL.createObjectURL(blob);
-            return { name: f.name, size: f.length, url };
-          })
-        );
-        setFiles(fileObjs);
-      })();
-    });
+      
+      if (err.message && err.message.includes('duplicate')) {
+        console.warn('⚠️ Duplicate torrent detected');
+        setStatus('Torrent is already being seeded. Use existing active torrent in Profile → Seeding.');
+        setIsDownloading(false);
+      } else {
+        console.error('❌ Failed to add torrent to client');
+        setStatus(`Error: ${err.message || 'Failed to add torrent'}`);
+        setIsDownloading(false);
+      }
+    }
   };
 
   return (
@@ -149,20 +1043,234 @@ export default function DownloadPage() {
               </button>
             </div>
 
-            {status && <div className="text-sm text-zinc-300">{status}</div>}
+
+            {/* Animated download progress bar */}
+            {isDownloading && (
+              <div className="my-6">
+                <div className="rounded-xl bg-zinc-900/90 p-6 shadow-lg border border-cyan-700">
+                  <AnimatedDownload 
+                    isAnimating={isDownloading} 
+                    className="text-white"
+                    progress={downloadProgress}
+                    timeRemainingSeconds={timeRemaining}
+                    downloadSpeed={downloadSpeed}
+                    filesCount={fileCount}
+                  />
+                  <div className="text-xs text-cyan-300 mt-2 font-semibold drop-shadow">
+                    Peers connected: {peerCount}
+                    {downloadSpeed > 0 && (
+                      <span className="ml-4">
+                        Speed: {(downloadSpeed / 1024 / 1024).toFixed(2)} MB/s
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {/* Status and manual retry */}
+            <div className="flex items-center justify-between">
+              {status && <div className="text-sm text-zinc-300 flex-1">{status}</div>}
+              {isDownloadComplete && files.length === 0 && currentTorrent && (
+                <button
+                  onClick={async () => {
+                    setStatus('Manually extracting files...');
+                    try {
+                      if (currentTorrent.files && currentTorrent.files.length > 0) {
+                        console.log(`Manually extracting ${currentTorrent.files.length} file(s)...`);
+                        const fileObjs = await Promise.all(
+                          currentTorrent.files.map(async (f: any) => {
+                            let blob: Blob;
+                            if (f.getBlob && typeof f.getBlob === 'function') {
+                              blob = await new Promise<Blob>((resolve, reject) => {
+                                f.getBlob((err: any, result: Blob) => {
+                                  if (err) reject(err);
+                                  else resolve(result);
+                                });
+                              });
+                            } else if (f.blob && typeof f.blob === 'function') {
+                              blob = await f.blob();
+                            } else {
+                              throw new Error('No blob method available');
+                            }
+                            const url = URL.createObjectURL(blob);
+                            const filePath = f.path || f.name || 'file';
+                            return { 
+                              name: f.name || 'file', 
+                              size: f.length || 0, 
+                              url,
+                              path: filePath,
+                              blob: blob
+                            };
+                          })
+                        );
+                        console.log(`Successfully extracted ${fileObjs.length} file(s) manually`);
+                        setFiles(fileObjs);
+                        setStatus(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} extracted!`);
+                      } else {
+                        setStatus('No files found in torrent.');
+                      }
+                    } catch (err: any) {
+                      console.error('Manual extraction error:', err);
+                      setStatus(`Failed to extract: ${err.message || 'Unknown error'}`);
+                    }
+                  }}
+                  className="ml-4 text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
+                >
+                  Extract Files
+                </button>
+              )}
+            </div>
 
             {files.length > 0 && (
               <div className="mt-4 space-y-2">
-                <div className="text-sm text-zinc-300">Files</div>
-                {files.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-                    <div>
-                      <div className="text-sm text-zinc-100">{f.name}</div>
-                      <div className="text-xs text-zinc-500">{(f.size/1024/1024).toFixed(2)} MB</div>
-                    </div>
-                    <a className="text-sm text-cyan-400 hover:text-cyan-300" href={f.url} download={f.name}>Save</a>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm text-zinc-300">
+                    {files.length === 1 ? 'File' : `${files.length} Files`}
                   </div>
-                ))}
+                  {/* Show ZIP option if multiple files OR if single file has folder structure */}
+                  {(files.length > 1 || (files.length === 1 && files[0].path && files[0].path.includes('/'))) && (
+                    <button
+                      onClick={async () => {
+                        if (files.length === 0) {
+                          setStatus('No files available to ZIP');
+                          return;
+                        }
+                        
+                        // Warn if download might not be complete
+                        if (!isDownloadComplete && downloadProgress < 100) {
+                          const proceed = confirm('Download may not be complete yet. Some files might be missing from the ZIP. Continue anyway?');
+                          if (!proceed) return;
+                        }
+                        
+                        setStatus('Creating ZIP archive...');
+                        try {
+                          const zip = new JSZip();
+                          let filesAdded = 0;
+                          
+                          // Add all files to ZIP with preserved folder structure
+                          // Use stored blobs directly, or fetch if blob not available
+                          await Promise.all(
+                            files.map(async (f, index) => {
+                              try {
+                                let blob: Blob;
+                                if (f.blob) {
+                                  // Use stored blob directly (preferred)
+                                  blob = f.blob;
+                                } else {
+                                  // Fallback: fetch from URL if blob not stored
+                                  console.log(`Fetching ${f.name} from URL for ZIP...`);
+                                  const response = await fetch(f.url);
+                                  if (!response.ok) {
+                                    throw new Error(`Failed to fetch ${f.name}: ${response.statusText}`);
+                                  }
+                                  blob = await response.blob();
+                                }
+                                
+                                // Normalize path for ZIP (ensure forward slashes)
+                                let zipPath = f.path || f.name;
+                                // Remove leading slash if present
+                                zipPath = zipPath.replace(/^\/+/, '');
+                                
+                                // Verify blob is valid
+                                if (!blob || blob.size === 0) {
+                                  throw new Error(`Blob for ${f.name} is empty or invalid`);
+                                }
+                                
+                                // Add file to ZIP
+                                zip.file(zipPath, blob);
+                                filesAdded++;
+                                console.log(`Added to ZIP: ${zipPath} (${(blob.size / 1024).toFixed(1)} KB)`);
+                              } catch (err: any) {
+                                console.error(`Error adding ${f.name} to ZIP:`, err);
+                                // Don't throw - continue with other files
+                                setStatus(`Warning: Could not add ${f.name} to ZIP: ${err.message || 'Unknown error'}. Continuing...`);
+                              }
+                            })
+                          );
+                          
+                          if (filesAdded === 0) {
+                            throw new Error('No files could be added to ZIP');
+                          }
+                          
+                          setStatus(`Compressing ${filesAdded} file${filesAdded > 1 ? 's' : ''}...`);
+                          
+                          // Generate ZIP file
+                          const zipBlob = await zip.generateAsync({ 
+                            type: 'blob',
+                            compression: 'DEFLATE',
+                            compressionOptions: { level: 6 }
+                          }, (metadata) => {
+                            // Update status with compression progress
+                            if (metadata.percent) {
+                              setStatus(`Compressing... ${Math.round(metadata.percent)}%`);
+                            }
+                          });
+                          
+                          setStatus('Starting download...');
+                          
+                          // Create download link
+                          const url = URL.createObjectURL(zipBlob);
+                          // Extract folder name from path or use default
+                          let zipName = 'downloads.zip';
+                          if (files[0]?.path) {
+                            const folderMatch = files[0].path.match(/^([^\/]+)/);
+                            if (folderMatch) {
+                              zipName = folderMatch[1] + '.zip';
+                            }
+                          } else if (files.length === 1 && files[0]?.name) {
+                            zipName = files[0].name.replace(/\.[^/.]+$/, '') + '.zip';
+                          }
+                          
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = zipName;
+                          document.body.appendChild(a);
+                          a.click();
+                          
+                          setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                            setStatus(`ZIP download started! (${filesAdded} file${filesAdded > 1 ? 's' : ''})`);
+                          }, 100);
+                        } catch (err: any) {
+                          console.error('Error creating ZIP:', err);
+                          setStatus(`Failed to create ZIP: ${err.message || 'Unknown error'}. Try downloading files individually.`);
+                        }
+                      }}
+                      className="text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
+                    >
+                      📦 Download as ZIP
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-96 overflow-y-auto space-y-2">
+                  <div className="text-xs text-zinc-500 mb-2 px-1">
+                    {(files.length > 1 || (files.length === 1 && files[0].path && files[0].path.includes('/')))
+                      ? '💡 Tip: Use "Download as ZIP" above to download with preserved folder structure, or download individually below.'
+                      : 'Click Save to download this file.'}
+                  </div>
+                  {files.map((f, i) => (
+                    <div key={i} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-zinc-100 truncate">{f.name}</div>
+                        {f.path && f.path !== f.name && (
+                          <div className="text-xs text-zinc-500 truncate" title={f.path}>
+                            📁 {f.path}
+                          </div>
+                        )}
+                        <div className="text-xs text-zinc-500 mt-1">{(f.size/1024/1024).toFixed(2)} MB</div>
+                      </div>
+                      <a 
+                        className="text-sm text-cyan-400 hover:text-cyan-300 ml-2 flex-shrink-0 px-3 py-1.5 rounded-md border border-zinc-700/50 bg-zinc-800/30 hover:bg-zinc-800/50" 
+                        href={f.url} 
+                        download={f.path || f.name}
+                      >
+                        Save
+                      </a>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

@@ -86,7 +86,7 @@ function DockIcon({ icon, onClick, ariaLabel }: {
       role="button"
       aria-label={ariaLabel}
       tabIndex={0}
-      onKeyDown={(e) => {
+      onKeyDown={(e: React.KeyboardEvent) => {
         if (e.key === 'Enter' || e.key === ' ') {
           onClick();
         }
