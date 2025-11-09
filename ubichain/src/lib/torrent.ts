@@ -1,6 +1,6 @@
 let client: any | null = null;
 // Use default WebTorrent trackers (no custom server needed)
-const DEFAULT_TRACKERS = [
+export const DEFAULT_TRACKERS = [
   'wss://tracker.openwebtorrent.com',
   'wss://tracker.btorrent.xyz',
   'wss://tracker.fastcast.nz'
@@ -9,6 +9,24 @@ const DEFAULT_TRACKERS = [
 export async function getWebTorrentClient(): Promise<any> {
   if (typeof window === 'undefined') throw new Error('WebTorrent only available in browser');
   if (!client) {
+    // Ensure crypto is available (WebTorrent needs it for parsing torrents)
+    if (typeof window !== 'undefined' && !window.crypto) {
+      console.warn('⚠️ Web Crypto API not available - WebTorrent may have issues');
+    }
+    
+    // Ensure crypto polyfill is available if Web Crypto API is not
+    if (typeof window !== 'undefined' && typeof (window as any).crypto === 'undefined') {
+      try {
+        // Try to import crypto-browserify if needed
+        const cryptoPolyfill = await import('crypto-browserify');
+        if (cryptoPolyfill && !(window as any).crypto) {
+          (window as any).crypto = cryptoPolyfill;
+        }
+      } catch (e) {
+        console.warn('Could not load crypto polyfill:', e);
+      }
+    }
+    
   // Use the browser build of WebTorrent to avoid Node.js-only code
   // @ts-ignore: No types for browser build
   const WebTorrent = (await import('webtorrent/dist/webtorrent.min.js')).default as any;
@@ -28,7 +46,18 @@ export async function getWebTorrentClient(): Promise<any> {
     } as any);
     
     // Debug logging for peer connections
-    client.on('error', (err: any) => console.error('WebTorrent error:', err));
+    client.on('error', (err: any) => {
+      console.error('WebTorrent client error:', err);
+      // Log crypto errors specifically
+      if (err.message && (err.message.includes('no web crypto') || err.message.includes('crypto'))) {
+        console.error('⚠️ Web Crypto API Error:', err.message);
+        console.error('This usually means:');
+        console.error('1. The page is served over HTTP instead of HTTPS');
+        console.error('2. The browser doesn\'t support Web Crypto API');
+        console.error('3. Browser security settings are blocking Web Crypto');
+        console.error('Solution: Use a magnet URI instead of .torrent file, or serve over HTTPS');
+      }
+    });
     client.on('warning', (err: any) => console.warn('WebTorrent warning:', err));
     
     // Log peer connections

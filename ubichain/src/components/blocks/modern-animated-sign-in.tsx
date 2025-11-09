@@ -582,7 +582,7 @@ interface AuthTabsProps {
     textVariantButton?: string;
     errorField?: string;
   };
-  goTo: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  goTo?: (event: React.MouseEvent<HTMLButtonElement>) => void;
   handleSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   googleLogin?: string;
   onGoogleClick?: () => void;

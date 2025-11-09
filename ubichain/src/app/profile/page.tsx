@@ -7,9 +7,11 @@ import { supabase } from "@/lib/supabase/client";
 import { EnhancedImageUpload } from "../../components/ui/enhanced-image-upload";
 import FileUploader from "../../components/FileUploader";
 import AuthService from "@/lib/auth";
-import { getPeerId } from "@/lib/torrent";
 import { getWebTorrentClient } from '@/lib/torrent';
 import { Buffer } from 'buffer';
+import { useToast } from "@/components/ui/toast-1";
+import { useWallet } from "@/hooks/use-wallet";
+import { WalletConnect } from "@/components/ui/wallet-connect";
 
 function TwoFAModal({ open, onClose, onVerify, verifying, error }: {
   open: boolean;
@@ -21,33 +23,37 @@ function TwoFAModal({ open, onClose, onVerify, verifying, error }: {
   const [code, setCode] = useState("");
   if (!open) return null;
   return (
-  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 pointer-events-none">
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 w-full max-w-xs shadow-xl">
-        <div className="text-lg font-semibold text-zinc-100 mb-2">2FA Verification</div>
-        <div className="text-sm text-zinc-400 mb-4">Enter your 6-digit code from your authenticator app.</div>
+  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+      <div className="rounded-3xl border border-white/20 bg-white/10 backdrop-blur-2xl p-6 w-full max-w-xs shadow-2xl shadow-purple-500/20 relative overflow-hidden pointer-events-auto">
+        {/* Glass reflection */}
+        <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-transparent pointer-events-none"></div>
+        <div className="relative">
+          <div className="text-lg font-semibold text-white mb-2 drop-shadow-sm">2FA Verification</div>
+          <div className="text-sm text-white/70 mb-4">Enter your 6-digit code from your authenticator app.</div>
         <input
           type="text"
           inputMode="numeric"
           pattern="[0-9]{6}"
           maxLength={6}
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 mb-2"
+            className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white placeholder:text-white/40 mb-2 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all"
           placeholder="123456"
           value={code}
           onChange={e => setCode(e.target.value)}
           disabled={verifying}
         />
-        {error && <div className="text-xs text-red-400 mb-2">{error}</div>}
+          {error && <div className="text-xs text-red-300 mb-2">{error}</div>}
         <div className="flex gap-2 mt-2">
           <button
-            className="flex-1 rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
+              className="flex-1 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-sm text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-200"
             onClick={onClose}
             disabled={verifying}
           >Cancel</button>
           <button
-            className="flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+              className="flex-1 rounded-xl bg-gradient-to-br from-emerald-500/80 to-cyan-500/80 backdrop-blur-md px-3 py-2.5 text-sm text-white font-medium hover:from-emerald-500 hover:to-cyan-500 disabled:opacity-60 shadow-lg shadow-emerald-500/20 transition-all duration-200"
             onClick={() => onVerify(code)}
             disabled={verifying || code.length !== 6}
           >{verifying ? "Verifying…" : "Verify"}</button>
+          </div>
         </div>
       </div>
     </div>
@@ -217,6 +223,9 @@ export default function UserProfile() {
 
   // 2FA state (must be after 'active')
   const [mfaEnrolled, setMfaEnrolled] = useState(false);
+  // Delete account confirmation modal
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   const [mfaLoading, setMfaLoading] = useState(false);
   const [mfaError, setMfaError] = useState<string | null>(null);
   const [totpSecret, setTotpSecret] = useState<string | null>(null);
@@ -245,6 +254,7 @@ export default function UserProfile() {
   const router = useRouter();
   const [user, setUser] = useState<ProfileUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mounted, setMounted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null);
@@ -253,12 +263,12 @@ export default function UserProfile() {
   const [tempProfilePicUrl, setTempProfilePicUrl] = useState<string | null>(null);
   const [profilePicChanged, setProfilePicChanged] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const { showToast } = useToast();
   // Seeding points state (client-side calculation from WebTorrent stats)
-  const [peerId, setPeerId] = useState<string | null>(null);
   const [points, setPoints] = useState<number>(0);
-  const [totalUploaded, setTotalUploaded] = useState<number>(0);
   const [totalSeedingTime, setTotalSeedingTime] = useState<number>(0);
+  // Wallet connection (for blockchain file registration)
+  const wallet = useWallet();
   // Account form state
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -266,6 +276,11 @@ export default function UserProfile() {
   // Security form state
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  // Set mounted on client side to prevent hydration mismatch
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     async function load() {
@@ -295,8 +310,10 @@ export default function UserProfile() {
       setProfilePicUrl(meta.profile_pic || null);
       setLoading(false);
     }
+    if (mounted) {
     load();
-  }, [router]);
+    }
+  }, [router, mounted]);
 
   // Note: Seeding is now handled on the Share page. Points are calculated from WebTorrent client stats.
 
@@ -307,23 +324,24 @@ export default function UserProfile() {
         const client = (window as any).__webtorrentClient;
         if (!client) return;
         
-        const peerId = client.peerId?.toString?.('hex') || null;
-        setPeerId(peerId);
-        
         // Calculate points from all torrents
         const torrents = client.torrents || [];
-        let totalBytes = 0;
-        let seedingCount = 0;
+        let activeSeedingCount = 0;
         
         torrents.forEach((torrent: any) => {
-          totalBytes += torrent.uploaded || 0;
-          if (torrent.uploaded > 0) seedingCount++;
+          // Count actively seeding torrents (torrents that are ready to seed)
+          // A torrent is seeding if it's done (all pieces available) or was created via seed()
+          // We check if torrent is ready and has files available for seeding
+          const isSeeding = torrent.done === true || (torrent.ready && torrent.files && torrent.files.length > 0);
+          if (isSeeding) {
+            activeSeedingCount++;
+          }
         });
         
-        // Points = uploaded bytes in KB + (10 per actively seeding torrent)
-        const calculatedPoints = Math.floor((totalBytes || 0) / 1024) + (seedingCount * 10);
+        // Points calculation: 10 points per actively seeding file/torrent
+        // Points are based solely on the number of files being seeded, not file size
+        const calculatedPoints = activeSeedingCount * 10;
         setPoints(calculatedPoints);
-        setTotalUploaded(totalBytes);
       } catch (err) {
         console.error('Points calculation error:', err);
       }
@@ -342,16 +360,18 @@ export default function UserProfile() {
     };
   }, []);
 
-  function showToast(message: string) {
-    setToast(message);
-    setTimeout(() => setToast(null), 2200);
-  }
 
 
-  if (loading) {
+  // Prevent hydration mismatch by not rendering loading state until mounted
+  if (!mounted || loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black grid place-items-center">
-        <div className="text-zinc-300">Loading your profile…</div>
+      <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-950 to-black grid place-items-center relative overflow-hidden">
+        <div className="fixed inset-0 -z-10">
+          <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-purple-500/10 to-pink-500/10 animate-pulse"></div>
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl px-6 py-4 shadow-2xl shadow-purple-500/10">
+          <div className="text-white/90">Loading your profile…</div>
+        </div>
       </div>
     );
   }
@@ -361,37 +381,53 @@ export default function UserProfile() {
   const initials = (user.fullName || user.email || "U").split(" ").map((s) => s[0]?.toUpperCase()).slice(0, 2).join("");
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black">
-      <div className="mx-auto max-w-6xl px-4 py-10">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-950 to-black relative overflow-hidden">
+      {/* Animated background layers for depth */}
+      <div className="fixed inset-0 -z-10">
+        <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-purple-500/10 to-pink-500/10 animate-pulse"></div>
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(120,119,198,0.15),transparent_50%)]"></div>
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_80%,rgba(59,130,246,0.15),transparent_50%)]"></div>
+      </div>
+      
+      <div className="mx-auto max-w-6xl px-4 py-10 relative z-10">
         {/* Header */}
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 backdrop-blur">
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-purple-500/10 relative overflow-hidden">
+          {/* Glass reflection effect */}
+          <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+          <div className="relative">
           <div className="flex items-center gap-4">
             {profilePicUrl ? (
+                <div className="relative">
+                  <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-cyan-400/50 to-purple-500/50 blur-xl"></div>
               <img 
                 src={profilePicUrl} 
                 alt="Profile" 
-                className="h-16 w-16 rounded-xl object-cover border-2 border-zinc-700"
+                    className="relative h-16 w-16 rounded-2xl object-cover border border-white/20 shadow-lg"
               />
+                </div>
             ) : (
-              <div className="h-16 w-16 rounded-xl bg-gradient-to-br from-cyan-500 to-indigo-600 grid place-items-center text-white text-2xl font-bold">
+                <div className="relative">
+                  <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-cyan-400/50 to-purple-500/50 blur-xl"></div>
+                  <div className="relative h-16 w-16 rounded-2xl bg-gradient-to-br from-cyan-400 to-purple-500 grid place-items-center text-white text-2xl font-bold shadow-lg border border-white/20">
                 {initials}
+                  </div>
               </div>
             )}
             <div className="flex-1">
-              <div className="text-white text-xl font-semibold">
+                <div className="text-white text-xl font-semibold drop-shadow-sm">
                 {user.fullName || user.email}
               </div>
-              <div className="text-sm text-zinc-400">
+                <div className="text-sm text-white/70">
                 {user.email}
                 {user.emailVerified ? (
-                  <span className="ml-2 inline-flex items-center gap-1 text-emerald-400">
+                    <span className="ml-2 inline-flex items-center gap-1 text-emerald-300">
                     <ShieldCheck className="h-4 w-4" /> verified
                   </span>
                 ) : null}
               </div>
             </div>
             <button
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2.5 text-sm text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-300 shadow-lg shadow-black/20"
               onClick={async () => {
                 await AuthService.signOut();
                 router.push("/signin");
@@ -399,37 +435,46 @@ export default function UserProfile() {
             >
               <LogOut className="h-4 w-4" /> Sign out
             </button>
+            </div>
           </div>
         </div>
 
         {/* Body */}
         <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
           {/* Sidebar */}
-          <aside className="rounded-2xl border-2 border-emerald-600 bg-gradient-to-b from-zinc-900 via-zinc-900 to-slate-900/90 shadow-xl p-2 backdrop-blur-lg">
+          <aside className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl shadow-2xl shadow-purple-500/10 p-3 relative overflow-hidden">
+            {/* Glass reflection */}
+            <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+            <div className="relative space-y-1.5">
             <NavItem icon={<Activity className="h-4 w-4" />} label="Overview" active={active === "overview"} onClick={() => setActive("overview")} />
             <NavItem icon={<User2 className="h-4 w-4" />} label="Account" active={active === "account"} onClick={() => setActive("account")} />
             <NavItem icon={<ShieldCheck className="h-4 w-4" />} label="Security" active={active === "security"} onClick={() => setActive("security")} />
             <NavItem icon={<Settings className="h-4 w-4" />} label="Sessions" active={active === "sessions"} onClick={() => setActive("sessions")} />
             <NavItem icon={<Link2 className="h-4 w-4" />} label="Providers" active={active === "providers"} onClick={() => setActive("providers")} />
             <NavItem icon={<AlertTriangle className="h-4 w-4" />} label="Danger" active={active === "danger"} onClick={() => setActive("danger")} />
+            </div>
           </aside>
 
           {/* Content */}
-          <main className="min-h-[520px] rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6">
+          <main className="min-h-[520px] rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-purple-500/10 relative overflow-hidden">
+            {/* Glass reflection */}
+            <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+            <div className="relative">
             {active === "overview" && (
-              <>
-                <div className="space-y-6">
-                  <SectionTitle icon={<Activity className="h-5 w-5" />} title="Overview" subtitle="Your account at a glance" />
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <InfoCard label="Email" value={user.email || "—"} />
-                    <InfoCard label="User ID" value={user.id} copyable />
-                    <InfoCard label="Created" value={new Date(user.createdAt).toLocaleString()} />
-                    <InfoCard label="Last sign in" value={user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"} />
-                    <InfoCard label="Seeding points" value={points.toFixed(0)} />
-                    <InfoCard label="Peer ID" value={peerId || "—"} copyable />
-                  </div>
+                <>
+              <div className="space-y-6">
+                <SectionTitle icon={<Activity className="h-5 w-5" />} title="Overview" subtitle="Your account at a glance" />
+                    <div className="mb-4">
+                      <WalletConnect />
+                    </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <InfoCard label="Email" value={user.email || "—"} />
+                  <InfoCard label="Created" value={new Date(user.createdAt).toLocaleString()} />
+                  <InfoCard label="Last sign in" value={user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"} />
+                      <InfoCard label="Seeding points" value={points.toFixed(0)} />
                 </div>
-              </>
+              </div>
+                </>
             )}
 
             {active === "account" && (
@@ -443,15 +488,15 @@ export default function UserProfile() {
                       setProfilePicChanged(true);
                     }}
                     onUploadStart={() => {
-                      showToast('Uploading profile picture...');
+                      showToast('Uploading profile picture...', 'info');
                     }}
                     onUploadComplete={(url: string) => {
                       setTempProfilePicUrl(url);
                       setProfilePicChanged(true);
-                      showToast('Profile picture uploaded successfully! Click Update to save changes.');
+                      showToast('Profile picture uploaded successfully! Click Update to save changes.', 'success');
                     }}
                     onUploadError={(error: string) => {
-                      showToast(`Upload failed: ${error}`);
+                      showToast(`Upload failed: ${error}`, 'error');
                     }}
                     title="Profile Picture"
                     supportedFormats="Supported formats: JPG, PNG, GIF (Max 5MB)"
@@ -471,22 +516,22 @@ export default function UserProfile() {
                             });
                             
                             if (error) {
-                              showToast('Failed to update profile picture');
+                              showToast('Failed to update profile picture', 'error');
                             } else {
                               setProfilePicUrl(tempProfilePicUrl);
                               setUser(u => u ? { ...u, profilePic: tempProfilePicUrl } : u);
                               setProfilePicChanged(false);
                               setTempProfilePicUrl(null);
-                              showToast('Profile picture updated successfully!');
+                              showToast('Profile picture updated successfully!', 'success');
                             }
                           } catch (error) {
-                            showToast('Failed to update profile picture');
+                            showToast('Failed to update profile picture', 'error');
                           } finally {
                             setSaving(false);
                           }
                         }}
                         disabled={saving || !tempProfilePicUrl}
-                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+                        className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-cyan-500/80 to-purple-500/80 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:from-cyan-500 hover:to-purple-500 disabled:opacity-60 shadow-lg shadow-cyan-500/20 transition-all duration-300"
                       >
                         {saving ? "Updating..." : "Update Profile Picture"}
                       </button>
@@ -496,7 +541,7 @@ export default function UserProfile() {
                           setTempProfilePicUrl(null);
                           setProfilePicChanged(false);
                         }}
-                        className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2.5 text-sm text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-200"
                       >
                         Cancel
                       </button>
@@ -506,28 +551,28 @@ export default function UserProfile() {
 
                 {/* Name Section */}
                 <div>
-                  <div className="mb-2 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1">Name</div>
+                  <div className="mb-2 text-base font-semibold text-white border-b border-white/10 pb-1">Name</div>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <label className="text-sm text-zinc-300">First name</label>
+                      <label className="text-sm text-white/80">First name</label>
                       <input
                         value={firstName}
                         onChange={(e) => setFirstName(e.target.value)}
                         placeholder="Jane"
-                        className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-400 placeholder:text-zinc-500"
+                        className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         readOnly={!editingName}
-                        style={!editingName ? { backgroundColor: '#23272e', cursor: 'not-allowed', color: '#888' } : {}}
+                        disabled={!editingName}
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm text-zinc-300">Last name</label>
+                      <label className="text-sm text-white/80">Last name</label>
                       <input
                         value={lastName}
                         onChange={(e) => setLastName(e.target.value)}
                         placeholder="Doe"
-                        className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-400 placeholder:text-zinc-500"
+                        className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         readOnly={!editingName}
-                        style={!editingName ? { backgroundColor: '#23272e', cursor: 'not-allowed', color: '#888' } : {}}
+                        disabled={!editingName}
                       />
                     </div>
                   </div>
@@ -550,11 +595,11 @@ export default function UserProfile() {
                           });
                           setSaving(false);
                           setEditingName(false);
-                          if (error) return showToast("Failed to save");
+                          if (error) return showToast("Failed to save", 'error');
                           setUser((u) => u ? { ...u, firstName, lastName, fullName } : u);
-                          showToast("Profile updated");
+                          showToast("Profile updated", 'success');
                         }}
-                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+                        className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-br from-cyan-500/80 to-purple-500/80 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:from-cyan-500 hover:to-purple-500 disabled:opacity-60 shadow-lg shadow-cyan-500/20 transition-all duration-300"
                       >
                         {saving ? "Saving…" : "Save changes"}
                       </button>
@@ -569,19 +614,21 @@ export default function UserProfile() {
                 <SectionTitle icon={<ShieldCheck className="h-5 w-5" />} title="Security" subtitle="Keep your account secure" />
                 {/* 2FA Section */}
                 <div className="mb-8">
-                  <div className="mb-3 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1">Two-Factor Authentication (2FA)</div>
-                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  <div className="mb-3 text-base font-semibold text-white border-b border-white/10 pb-1">Two-Factor Authentication (2FA)</div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                    <div className="relative">
                     <div className="mb-2 flex items-center gap-2">
-                      <span className="font-medium text-zinc-200">Status:</span>
-                      {mfaLoading && <span className="text-xs text-zinc-400 ml-2">Checking…</span>}
-                      {mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-400 ring-1 ring-inset ring-emerald-500/30">Enabled</span>}
-                      {!mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-zinc-500/15 px-2 py-1 text-xs text-zinc-400 ring-1 ring-inset ring-zinc-500/30">Disabled</span>}
+                      <span className="font-medium text-white/90">Status:</span>
+                      {mfaLoading && <span className="text-xs text-white/60 ml-2">Checking…</span>}
+                      {mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300 ring-1 ring-inset ring-emerald-500/40 backdrop-blur-sm">Enabled</span>}
+                      {!mfaEnrolled && !mfaLoading && <span className="ml-2 rounded-full bg-white/10 px-2 py-1 text-xs text-white/60 ring-1 ring-inset ring-white/20 backdrop-blur-sm">Disabled</span>}
                     </div>
-                    {mfaError && <div className="text-xs text-red-400 mb-2">{mfaError}</div>}
+                    {mfaError && <div className="text-xs text-red-300 mb-2">{mfaError}</div>}
                     {/* Enroll button */}
                     {!mfaEnrolled && !totpQr && (
                       <button
-                        className="rounded-lg bg-cyan-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-cyan-700 disabled:opacity-60"
+                        className="rounded-xl bg-gradient-to-br from-cyan-500/80 to-purple-500/80 backdrop-blur-md px-4 py-2.5 text-sm text-white font-medium hover:from-cyan-500 hover:to-purple-500 disabled:opacity-60 shadow-lg shadow-cyan-500/20 transition-all duration-300"
                         disabled={mfaLoading}
                         onClick={async () => {
                           setMfaError(null);
@@ -614,14 +661,14 @@ export default function UserProfile() {
                     {/* Show QR and verify */}
                     {totpQr && !mfaEnrolled && (
                       <div className="mt-4 space-y-2">
-                        <div className="text-zinc-300 text-sm">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc):</div>
+                        <div className="text-white/80 text-sm">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc):</div>
                         <div className="flex items-center gap-4 mt-2">
                           <div
-                            className="rounded-lg border border-zinc-700 bg-white"
+                            className="rounded-xl border border-white/20 bg-white/20 backdrop-blur-sm shadow-lg"
                             style={{ width: 250, height: 250, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
                             dangerouslySetInnerHTML={{ __html: patchSvgNamespace(totpQr) }}
                           />
-                          <div className="text-xs text-zinc-400 break-all">Secret: <span className="font-mono text-zinc-200">{totpSecret}</span></div>
+                          <div className="text-xs text-white/60 break-all">Secret: <span className="font-mono text-white/90">{totpSecret}</span></div>
                         </div>
                         <div className="mt-2">
                           <input
@@ -630,12 +677,12 @@ export default function UserProfile() {
                             pattern="[0-9]{6}"
                             maxLength={6}
                             placeholder="Enter 6-digit code"
-                            className="rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 w-40"
+                            className="rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 w-40 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all"
                             value={totpCode}
                             onChange={e => setTotpCode(e.target.value)}
                           />
                           <button
-                            className="ml-2 rounded-lg bg-emerald-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+                            className="ml-2 rounded-xl bg-gradient-to-br from-emerald-500/80 to-cyan-500/80 backdrop-blur-md px-4 py-2.5 text-sm text-white font-medium hover:from-emerald-500 hover:to-cyan-500 disabled:opacity-60 shadow-lg shadow-emerald-500/20 transition-all duration-300"
                             disabled={verifying || totpCode.length !== 6}
                             onClick={async () => {
                               setVerifying(true);
@@ -654,7 +701,7 @@ export default function UserProfile() {
                                 setTotpSecret(null);
                                 setTotpCode("");
                                 setMfaEnrolled(true);
-                                showToast("2FA enabled!");
+                                showToast("2FA enabled!", 'success');
                               } catch (e: any) {
                                 setMfaError(e.message || "Failed to verify code");
                               } finally {
@@ -671,7 +718,7 @@ export default function UserProfile() {
                     {mfaEnrolled && (
                       <div className="mt-4">
                         <button
-                          className="rounded-lg bg-red-600/80 px-4 py-2 text-sm text-white font-medium hover:bg-red-700 disabled:opacity-60"
+                          className="rounded-xl bg-gradient-to-br from-red-500/80 to-pink-500/80 backdrop-blur-md px-4 py-2.5 text-sm text-white font-medium hover:from-red-500 hover:to-pink-500 disabled:opacity-60 shadow-lg shadow-red-500/20 transition-all duration-300"
                           disabled={mfaLoading}
                           onClick={async () => {
                             setMfaError(null);
@@ -685,7 +732,7 @@ export default function UserProfile() {
                               const { error: removeError } = await supabase.auth.mfa.unenroll({ factorId: totp.id });
                               if (removeError) throw removeError;
                               setMfaEnrolled(false);
-                              showToast("2FA disabled");
+                              showToast("2FA disabled", 'info');
                             } catch (e: any) {
                               setMfaError(e.message || "Failed to disable 2FA");
                             } finally {
@@ -697,11 +744,12 @@ export default function UserProfile() {
                         </button>
                       </div>
                     )}
+                    </div>
                   </div>
                 </div>
                 {/* Password Change Section */}
                 <div className="mb-8">
-                  <div className="mb-3 text-base font-semibold text-zinc-100 border-b border-zinc-800 pb-1 flex items-center justify-between">
+                  <div className="mb-3 text-base font-semibold text-white border-b border-white/10 pb-1 flex items-center justify-between">
                     <span>Change Password</span>
                     <button
                       onClick={() => setShowPasswordFields((v) => !v)}
@@ -722,13 +770,13 @@ export default function UserProfile() {
                             inputMode="numeric"
                             pattern="[0-9]{6}"
                             maxLength={6}
-                            className="w-40 rounded-lg border border-emerald-700 bg-emerald-950/60 px-3 py-2 text-emerald-200 mb-2 text-center"
+                            className="w-40 rounded-xl border border-emerald-500/30 bg-emerald-500/10 backdrop-blur-md px-3 py-2.5 text-emerald-100 mb-2 text-center placeholder:text-emerald-300/50 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500/50 transition-all"
                             placeholder="123456"
                             value={twoFACode}
                             onChange={e => setTwoFACode(e.target.value)}
                             disabled={twoFAVerifying}
                           />
-                          {twoFAError && <div className="text-xs text-red-400 mb-2">{twoFAError}</div>}
+                          {twoFAError && <div className="text-xs text-red-300 mb-2">{twoFAError}</div>}
                           <div className="flex gap-2 mt-2">
                             <button
                               className="rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
@@ -745,17 +793,17 @@ export default function UserProfile() {
                       )}
                       <div className="grid gap-4 sm:grid-cols-3">
                         <div className="space-y-2">
-                          <label className="text-sm text-zinc-300">Old password</label>
+                          <label className="text-sm text-white/80">Old password</label>
                           <div className="relative">
                             <input
                               type={showOldPassword ? "text" : "password"}
                               value={oldPassword}
                               onChange={(e) => setOldPassword(e.target.value)}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                              className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 pr-10 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all"
                             />
                             <button
                               type="button"
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-white/60 hover:text-white transition-colors"
                               tabIndex={-1}
                               onClick={() => setShowOldPassword((v) => !v)}
                               aria-label={showOldPassword ? "Hide password" : "Show password"}
@@ -771,11 +819,11 @@ export default function UserProfile() {
                               type={showNewPassword ? "text" : "password"}
                               value={newPassword}
                               onChange={(e) => setNewPassword(e.target.value)}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                              className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 pr-10 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all"
                             />
                             <button
                               type="button"
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-white/60 hover:text-white transition-colors"
                               tabIndex={-1}
                               onClick={() => setShowNewPassword((v) => !v)}
                               aria-label={showNewPassword ? "Hide password" : "Show password"}
@@ -791,11 +839,11 @@ export default function UserProfile() {
                               type={showConfirmPassword ? "text" : "password"}
                               value={confirmPassword}
                               onChange={(e) => setConfirmPassword(e.target.value)}
-                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 pr-10"
+                              className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 pr-10 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500/50 transition-all"
                             />
                             <button
                               type="button"
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-white/60 hover:text-white transition-colors"
                               tabIndex={-1}
                               onClick={() => setShowConfirmPassword((v) => !v)}
                               aria-label={showConfirmPassword ? "Hide password" : "Show password"}
@@ -852,17 +900,17 @@ export default function UserProfile() {
                               }
                             });
                           }}
-                          className="inline-flex items-center gap-2 rounded-lg bg-zinc-100/10 px-4 py-2 text-sm font-medium text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-100/15 disabled:opacity-60"
+                          className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white/90 hover:bg-white/20 hover:border-white/30 disabled:opacity-60 transition-all duration-200 shadow-lg shadow-black/10"
                         >
                           {passwordSaving ? (
                             <>
-                              <span className="animate-spin inline-block mr-2 w-4 h-4 border-2 border-t-transparent border-zinc-200 rounded-full align-middle"></span>
+                              <span className="animate-spin inline-block mr-2 w-4 h-4 border-2 border-t-transparent border-white/60 rounded-full align-middle"></span>
                               Updating…
                             </>
                           ) : "Update password"}
                         </button>
-                        {passwordError && <div className="mt-2 text-sm text-red-400">{passwordError}</div>}
-                        {passwordSuccess && <div className="mt-2 text-sm text-emerald-400">{passwordSuccess}</div>}
+                        {passwordError && <div className="mt-2 text-sm text-red-300">{passwordError}</div>}
+                        {passwordSuccess && <div className="mt-2 text-sm text-emerald-300">{passwordSuccess}</div>}
                       </div>
                     </>
                   )}
@@ -873,9 +921,12 @@ export default function UserProfile() {
             {active === "sessions" && (
               <div className="space-y-6">
                 <SectionTitle icon={<Settings className="h-5 w-5" />} title="Sessions" subtitle="Recent authentication activity" />
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4 text-sm text-zinc-300">
+                <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 text-sm text-white/80 shadow-lg shadow-black/10 relative overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                  <div className="relative">
                   <div>Last sign in: {user.lastSignInAt ? new Date(user.lastSignInAt).toLocaleString() : "—"}</div>
-                  <div className="text-zinc-500 mt-1">More detailed session management can be added with Supabase Management API.</div>
+                  <div className="text-white/50 mt-1">More detailed session management can be added with Supabase Management API.</div>
+                  </div>
                 </div>
               </div>
             )}
@@ -885,9 +936,10 @@ export default function UserProfile() {
                 <SectionTitle icon={<Link2 className="h-5 w-5" />} title="Connected providers" subtitle="OAuth providers linked to your account" />
                 <div className="grid gap-3 sm:grid-cols-2">
                   {(user.providers && user.providers.length > 0 ? user.providers : ["email"]).map((p) => (
-                    <div key={p} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/40 px-4 py-3">
-                      <div className="text-zinc-200 capitalize">{p}</div>
-                      <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-xs text-emerald-400 ring-1 ring-inset ring-emerald-500/30">connected</span>
+                    <div key={p} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl px-4 py-3 shadow-lg shadow-black/10 relative overflow-hidden">
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                      <div className="relative flex-1 text-white/90 capitalize">{p}</div>
+                      <span className="relative rounded-full bg-emerald-500/20 px-2 py-1 text-xs text-emerald-300 ring-1 ring-inset ring-emerald-500/40 backdrop-blur-sm">connected</span>
                     </div>
                   ))}
                 </div>
@@ -901,7 +953,7 @@ export default function UserProfile() {
                 <SectionTitle icon={<AlertTriangle className="h-5 w-5" />} title="Danger zone" subtitle="Sensitive actions" />
                 <div className="space-y-3">
                   <button
-                    className="w-full rounded-lg bg-red-500/10 px-4 py-2 text-red-300 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/15"
+                    className="w-full rounded-xl border border-red-500/30 bg-red-500/10 backdrop-blur-md px-4 py-2.5 text-red-300 hover:bg-red-500/20 hover:border-red-500/40 transition-all duration-200 shadow-lg shadow-red-500/10"
                     onClick={async () => {
                       await AuthService.signOut();
                       router.push("/signin");
@@ -910,53 +962,98 @@ export default function UserProfile() {
                     Sign out everywhere
                   </button>
                   <button
-                    className="w-full rounded-lg bg-red-500/10 px-4 py-2 text-red-300 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/15"
-                    onClick={() => require2FA(async () => showToast("Delete account not implemented"))}
+                    className="w-full rounded-xl border border-red-500/30 bg-red-500/10 backdrop-blur-md px-4 py-2.5 text-red-300 hover:bg-red-500/20 hover:border-red-500/40 transition-all duration-200 shadow-lg shadow-red-500/10"
+                    onClick={() => setShowDeleteConfirm(true)}
                   >
                     Delete account (2FA required)
                   </button>
+
+                  {showDeleteConfirm && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+                      <div className="w-full max-w-md rounded-3xl border border-red-500/30 bg-white/10 backdrop-blur-2xl p-6 shadow-2xl shadow-red-500/20 relative overflow-hidden">
+                        <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                        <div className="relative">
+                        <div className="text-lg font-semibold text-red-300 mb-1 drop-shadow-sm">Confirm account deletion</div>
+                        <div className="text-sm text-white/80 mb-4">
+                          This action is irreversible. All your data and session will be permanently deleted.
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            className="rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2 text-sm text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-200"
+                            onClick={() => setShowDeleteConfirm(false)}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            className="rounded-xl bg-gradient-to-br from-red-500/80 to-pink-500/80 backdrop-blur-md px-3 py-2 text-sm text-white hover:from-red-500 hover:to-pink-500 shadow-lg shadow-red-500/20 transition-all duration-300"
+                            onClick={() => {
+                              setShowDeleteConfirm(false)
+                              require2FA(async () => {
+                                try {
+                                  showToast('Deleting account…', 'info')
+                                  const res = await fetch('/api/delete-account', { method: 'POST' })
+                                  const json = await res.json()
+                                  if (!res.ok) {
+                                    throw new Error(json?.error || 'Failed to delete account')
+                                  }
+                                  showToast('Account deleted', 'success')
+                                  await AuthService.signOut()
+                                  router.push('/signin')
+                                } catch (e: any) {
+                                  showToast(e?.message || 'Failed to delete account', 'error')
+                                }
+                              })
+                            }}
+                          >
+                            Yes, delete my account
+                          </button>
+                        </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
       {/* Inline 2FA Section (appears when show2FASection is true) */}
       {show2FASection && (
-        <div className="mb-6 p-4 rounded-xl border border-emerald-700 bg-emerald-950/40 flex flex-col items-center max-w-md mx-auto">
-          <div className="text-lg font-semibold text-emerald-200 mb-2">2FA Verification Required</div>
-          <div className="text-sm text-emerald-100 mb-4">Enter your 6-digit code from your authenticator app to continue.</div>
+              <div className="mb-6 p-4 rounded-3xl border border-emerald-500/30 bg-emerald-500/10 backdrop-blur-2xl flex flex-col items-center max-w-md mx-auto shadow-2xl shadow-emerald-500/20 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative w-full">
+                  <div className="text-lg font-semibold text-emerald-200 mb-2 drop-shadow-sm">2FA Verification Required</div>
+                  <div className="text-sm text-emerald-100/90 mb-4">Enter your 6-digit code from your authenticator app to continue.</div>
           <input
             type="text"
             inputMode="numeric"
             pattern="[0-9]{6}"
             maxLength={6}
-            className="w-40 rounded-lg border border-emerald-700 bg-emerald-950/60 px-3 py-2 text-emerald-200 mb-2 text-center"
+                    className="w-40 rounded-xl border border-emerald-500/30 bg-emerald-500/10 backdrop-blur-md px-3 py-2.5 text-emerald-100 mb-2 text-center placeholder:text-emerald-300/50 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500/50 transition-all"
             placeholder="123456"
             value={twoFACode}
             onChange={e => setTwoFACode(e.target.value)}
             disabled={twoFAVerifying}
           />
-          {twoFAError && <div className="text-xs text-red-400 mb-2">{twoFAError}</div>}
+                  {twoFAError && <div className="text-xs text-red-300 mb-2">{twoFAError}</div>}
           <div className="flex gap-2 mt-2">
             <button
-              className="rounded-lg bg-zinc-700 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-600"
+                      className="rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2 text-sm text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-200"
               onClick={() => { setShow2FASection(false); setTwoFACode(""); setTwoFAError(null); setTwoFAVerifying(false); }}
               disabled={twoFAVerifying}
             >Cancel</button>
             <button
-              className="rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white font-medium hover:bg-emerald-700 disabled:opacity-60"
+                      className="rounded-xl bg-gradient-to-br from-emerald-500/80 to-cyan-500/80 backdrop-blur-md px-3 py-2 text-sm text-white font-medium hover:from-emerald-500 hover:to-cyan-500 disabled:opacity-60 shadow-lg shadow-emerald-500/20 transition-all duration-300"
               onClick={() => handle2FAVerify(twoFACode)}
               disabled={twoFAVerifying || twoFACode.length !== 6}
             >{twoFAVerifying ? "Verifying…" : "Verify"}</button>
           </div>
-        </div>
-      )}
                 </div>
               </div>
             )}
+            </div>
           </main>
         </div>
 
-        {toast && (
-          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 rounded-full border border-zinc-800 bg-zinc-900/80 px-4 py-2 text-sm text-zinc-100 shadow-lg pointer-events-none">
-            {toast}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -966,15 +1063,17 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; labe
   return (
     <button
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-base font-medium transition-all duration-150
+      className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-base font-medium transition-all duration-300 relative overflow-hidden
         ${active
-          ? "bg-emerald-600 text-white shadow-lg border border-emerald-400 scale-[1.04]"
-          : "text-zinc-200 hover:bg-emerald-900/30 hover:text-white border border-transparent"}
+          ? "bg-gradient-to-br from-cyan-500/30 to-purple-500/30 text-white shadow-lg shadow-cyan-500/20 border border-white/30 backdrop-blur-md scale-[1.02]"
+          : "text-white/70 hover:bg-white/10 hover:text-white border border-transparent hover:border-white/20"}
       `}
-      style={{ boxShadow: active ? '0 2px 16px 0 rgba(16, 185, 129, 0.15)' : undefined }}
     >
-      {icon}
-      <span>{label}</span>
+      {active && (
+        <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-transparent"></div>
+      )}
+      <span className="relative z-10">{icon}</span>
+      <span className="relative z-10">{label}</span>
     </button>
   );
 }
@@ -982,24 +1081,27 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; labe
 function SectionTitle({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle?: string }) {
   return (
     <div>
-      <div className="flex items-center gap-2 text-white">
+      <div className="flex items-center gap-2 text-white drop-shadow-sm">
         {icon}
         <h2 className="text-lg font-semibold">{title}</h2>
       </div>
-      {subtitle ? <p className="mt-1 text-sm text-zinc-400">{subtitle}</p> : null}
+      {subtitle ? <p className="mt-1 text-sm text-white/60">{subtitle}</p> : null}
     </div>
   );
 }
 
 function InfoCard({ label, value, copyable = false }: { label: string; value: string; copyable?: boolean }) {
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-      <div className="text-xs uppercase tracking-wide text-zinc-400">{label}</div>
+    <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+      {/* Glass reflection */}
+      <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+      <div className="relative">
+        <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
       <div className="mt-1 flex items-center justify-between gap-2">
-        <div className="truncate text-zinc-100" title={value}>{value}</div>
+          <div className="truncate text-white/90" title={value}>{value}</div>
         {copyable ? (
           <button
-            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
+              className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs text-white/80 border border-white/20 bg-white/10 backdrop-blur-sm hover:bg-white/20 hover:border-white/30 transition-all duration-200"
             onClick={() => navigator.clipboard.writeText(value)}
             aria-label={`Copy ${label}`}
             title="Copy"
@@ -1007,6 +1109,7 @@ function InfoCard({ label, value, copyable = false }: { label: string; value: st
             <Copy className="h-3.5 w-3.5" /> Copy
           </button>
         ) : null}
+        </div>
       </div>
     </div>
   );
@@ -1015,13 +1118,15 @@ function InfoCard({ label, value, copyable = false }: { label: string; value: st
 function KeyRow({ label, value, onCopy }: { label: string; value: string; onCopy: () => void }) {
   const masked = mask(value);
   return (
-    <div className="flex items-center justify-between gap-4 rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-      <div className="min-w-0">
-        <div className="text-xs uppercase tracking-wide text-zinc-400">{label}</div>
-        <div className="truncate text-zinc-100" title={value}>{masked || "—"}</div>
+    <div className="flex items-center justify-between gap-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+      {/* Glass reflection */}
+      <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+      <div className="relative flex-1 min-w-0">
+        <div className="text-xs uppercase tracking-wide text-white/60">{label}</div>
+        <div className="truncate text-white/90" title={value}>{masked || "—"}</div>
       </div>
       <button
-        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-300 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
+        className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs text-white/80 border border-white/20 bg-white/10 backdrop-blur-sm hover:bg-white/20 hover:border-white/30 transition-all duration-200 relative z-10"
         onClick={() => {
           if (!value) return;
           navigator.clipboard.writeText(value);

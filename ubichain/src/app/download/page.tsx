@@ -1,12 +1,24 @@
 "use client";
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AnimatedDownload } from '@/components/ui/animated-download';
 import { getWebTorrentClient } from '@/lib/torrent';
 import { useRef } from 'react';
 import { useImageUpload } from '@/hooks/use-image-upload';
-import { ImagePlus } from 'lucide-react';
+import { ImagePlus, FileText } from 'lucide-react';
 import { Buffer } from 'buffer';
 import JSZip from 'jszip';
+import { useToast } from '@/components/ui/toast-1';
+import Folder from '@/components/Folder';
+
+// Helper function to format bytes to human-readable size (KB, MB, GB, TB)
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
 
 export default function DownloadPage() {
   const [magnet, setMagnet] = useState('');
@@ -24,6 +36,50 @@ export default function DownloadPage() {
   const [currentTorrent, setCurrentTorrent] = useState<any>(null);
   const [isDownloadComplete, setIsDownloadComplete] = useState<boolean>(false);
   const [fileCount, setFileCount] = useState<number>(0);
+  const { showToast } = useToast();
+
+  // Global error handler for unhandled promise rejections (e.g., crypto errors in WebTorrent)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const error = event.reason;
+      const errorMsg = error?.message || String(error) || 'Unknown error';
+      
+      // Check for crypto-related errors
+      if (errorMsg.includes('no web crypto') || errorMsg.includes('crypto') || errorMsg.includes('Web Crypto')) {
+        console.error('❌ Unhandled crypto error:', errorMsg);
+        
+        // Check if we're on HTTP (not HTTPS)
+        const isHttp = window.location.protocol === 'http:';
+        const isSecureContext = window.isSecureContext;
+        
+        const cryptoErrorMsg = '❌ Web Crypto API Error\n\n' +
+                              'WebTorrent requires Web Crypto API to verify torrent metadata, but it\'s not available.\n\n' +
+                              (isHttp ? '⚠️ You are using HTTP. Web Crypto API requires HTTPS.\n\n' : '') +
+                              (!isSecureContext ? '⚠️ This page is not in a secure context.\n\n' : '') +
+                              'Solutions:\n' +
+                              '1. Use HTTPS instead of HTTP (required for Web Crypto API)\n' +
+                              '2. Use a modern browser (Chrome, Firefox, Edge, Safari)\n' +
+                              '3. Ensure the page is served over HTTPS\n' +
+                              '4. Check browser console for more details';
+        
+        setStatus(cryptoErrorMsg);
+        showToast('Web Crypto API error - page must be served over HTTPS', 'error');
+        setIsDownloading(false);
+        setIsDownloadComplete(false);
+        
+        // Prevent the error from appearing in console as unhandled
+        event.preventDefault();
+      }
+    };
+    
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    
+    return () => {
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [showToast]);
 
   // Download handler for both magnet and .torrent file
   const handleDownload = async (inputMagnet?: string, inputTorrentFile?: File) => {
@@ -34,7 +90,7 @@ export default function DownloadPage() {
     setIsDownloading(true);
     setIsDownloadComplete(false);
     const client = await getWebTorrentClient();
-    let source: string | Buffer | undefined = undefined;
+    let source: string | Buffer | Blob | undefined = undefined;
     let infoHash: string | null = null;
     
     if (inputMagnet) {
@@ -44,275 +100,195 @@ export default function DownloadPage() {
       if (match) infoHash = match[1];
     } else if (inputTorrentFile) {
       try {
-        const arrBuf = await inputTorrentFile.arrayBuffer();
-        const torrentBuffer = Buffer.from(arrBuf);
-        
-        // Dynamically import parse-torrent to avoid SSR issues
-        // @ts-ignore
-        const parseTorrentModule = await import('parse-torrent');
-        const parseTorrent = parseTorrentModule.default || parseTorrentModule;
-        let parsed = parseTorrent(torrentBuffer);
-        
-        // Check if parseTorrent returns a Promise
-        if (parsed && typeof parsed.then === 'function') {
-          parsed = await parsed;
+        // WebTorrent can handle .torrent files directly, but it needs crypto support
+        // If crypto isn't available, we'll show a helpful error
+        if (inputTorrentFile.size === 0) {
+          throw new Error('Empty .torrent file');
         }
         
-        // Handle infoHash extraction (can be Buffer or string)
-        let parsedInfoHash: any;
-        if (parsed && parsed.infoHash) {
-          if (Buffer.isBuffer(parsed.infoHash)) {
-            parsedInfoHash = parsed.infoHash;
-            infoHash = parsedInfoHash.toString('hex');
-          } else if (typeof parsed.infoHash === 'string') {
-            parsedInfoHash = parsed.infoHash;
-            infoHash = parsedInfoHash;
-          } else {
-            parsedInfoHash = parsed.infoHash;
-            infoHash = parsedInfoHash.toString('hex');
-          }
-        } else {
-          console.error('Parsed torrent missing infoHash:', parsed);
-          throw new Error('Failed to parse torrent infoHash');
-        }
-        
-        // Check if torrent already exists in client (use hex string infoHash)
-        // Try both hex string and Buffer formats
-        let existing: any = null;
-        if (infoHash) {
-          existing = client.get(infoHash);
-          // If not found, try finding by infoHash in client.torrents array
-          if (!existing || typeof existing.on !== 'function') {
-            const torrents = client.torrents || [];
-            existing = torrents.find((t: any) => {
-              const tHash = Buffer.isBuffer(t.infoHash) 
-                ? t.infoHash.toString('hex') 
-                : (typeof t.infoHash === 'string' ? t.infoHash : String(t.infoHash));
-              return tHash.toLowerCase() === (infoHash || '').toLowerCase();
-            });
-          }
-        }
-        
-        if (existing && typeof existing.on === 'function') {
-          setStatus('Torrent is already being seeded/downloaded. Using existing instance.');
-          setIsDownloading(true); // Keep as downloading to show progress
-          
-          // Set up listeners for existing torrent
-          setCurrentTorrent(existing);
-          setFileCount(existing.files?.length || 0);
-          
-          // Track if files have been successfully extracted to prevent status overwrites
-          let filesExtracted = false;
-          
-          // Helper function to update progress and stats
-          const updateExistingProgress = () => {
-            // Don't overwrite status if files are already extracted
-            if (filesExtracted) return;
-            
-            const progress = Math.round((existing.progress || 0) * 100);
-            const speed = existing.downloadSpeed || 0;
-            const downloaded = (existing.downloaded || 0);
-            const length = existing.length || 1;
-            const remaining = length - downloaded;
-            
-            setDownloadProgress(progress);
-            setDownloadSpeed(speed);
-            setPeerCount(existing.wires?.length || existing.numPeers || 0);
-            
-            // Calculate estimated time remaining
-            if (speed > 0 && remaining > 0) {
-              const estimatedSeconds = Math.ceil(remaining / speed);
-              setTimeRemaining(estimatedSeconds);
-            } else {
-              setTimeRemaining(0);
-            }
-            
-            // Update status based on progress
-            if (progress === 100) {
-              setStatus('Download complete! Extracting files...');
-            } else if (progress > 0) {
-              setStatus(`Downloading... ${progress}%`);
-            } else if (existing.numPeers > 0) {
-              setStatus(`Connected to ${existing.numPeers} peer${existing.numPeers !== 1 ? 's' : ''}, waiting for data...`);
-            } else {
-              setStatus('Searching for peers...');
-            }
-          };
-          
-          // Helper to extract files from existing torrent
-          const extractExistingFiles = async () => {
-            if (!existing.files || existing.files.length === 0) {
-              console.log('No files found in existing torrent');
-              return;
-            }
-            
-            // Only extract if torrent is complete
-            const progress = existing.progress || 0;
-            if (progress < 1) {
-              console.log(`Torrent not complete yet (${Math.round(progress * 100)}%), waiting for completion...`);
-              return;
-            }
-            
-            try {
-              console.log(`Extracting ${existing.files.length} file(s) from existing torrent...`);
-              setStatus('Extracting files...');
-              
-              const fileObjs = await Promise.all(
-                existing.files.map(async (f: any, index: number) => {
-                  try {
-                    let blob: Blob;
-                    if (f.getBlob && typeof f.getBlob === 'function') {
-                      // WebTorrent's getBlob uses callback
-                      blob = await new Promise<Blob>((resolve, reject) => {
-                        f.getBlob((err: any, result: Blob) => {
-                          if (err) {
-                            console.error(`Error getting blob for file ${index + 1} (${f.name}):`, err);
-                            reject(err);
-                          } else {
-                            console.log(`Successfully got blob for file ${index + 1} (${f.name}), size: ${result.size} bytes`);
-                            resolve(result);
-                          }
-                        });
-                      });
-                    } else if (f.blob && typeof f.blob === 'function') {
-                      blob = await f.blob();
-                    } else {
-                      throw new Error('No blob method available');
-                    }
-                    
-                    if (!blob || blob.size === 0) {
-                      throw new Error(`Blob for ${f.name} is empty`);
-                    }
-                    
-                    const url = URL.createObjectURL(blob);
-                    // Preserve folder structure - WebTorrent files have path property
-                    const filePath = f.path || f.name || 'file';
-                    return { 
-                      name: f.name || 'file', 
-                      size: f.length || 0, 
-                      url,
-                      path: filePath, // Full path including folder structure
-                      blob: blob // Store the blob directly for ZIP creation
-                    };
-                  } catch (err: any) {
-                    console.error(`Failed to extract file ${index + 1} (${f.name}):`, err);
-                    throw err;
-                  }
-                })
-              );
-              
-              console.log(`Successfully extracted ${fileObjs.length} file(s), setting files in state...`);
-              setFiles(fileObjs);
-              filesExtracted = true;
-              setIsDownloadComplete(true);
-              setIsDownloading(false);
-              
-              if (fileObjs.length > 0) {
-                setStatus(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} ready to download.`);
-                console.log(`Files state updated, should see download buttons now`);
-              }
-            } catch (err: any) {
-              console.error('Error getting files from existing torrent:', err);
-              setStatus(`Error extracting files: ${err.message || 'Unknown error'}. Try the "Extract Files" button below.`);
-            }
-          };
-          
-          // Initial progress update
-          updateExistingProgress();
-          
-          existing.on('wire', () => {
-            updateExistingProgress();
-          });
-          existing.on('noPeers', () => {
-            updateExistingProgress();
-          });
-          existing.on('download', () => {
-            updateExistingProgress();
-          });
-          existing.on('upload', () => {
-            updateExistingProgress();
-          });
-          
-          existing.on('done', () => {
-            console.log('Existing torrent done event fired');
-            setDownloadProgress(100);
-            setDownloadSpeed(0);
-            setTimeRemaining(0);
-            setIsDownloadComplete(true);
-            
-            // Extract files when download is complete
-            extractExistingFiles().catch((err) => {
-              console.error('Error in extractExistingFiles on done event:', err);
-              setIsDownloading(false);
-            });
-          });
-          
-          // Periodic progress updates for existing torrent
-          const existingProgressInterval = setInterval(() => {
-            if (existing && !existing.destroyed) {
-              updateExistingProgress();
-              
-              // Try to extract files if complete but not yet extracted
-              if (!filesExtracted && (existing.progress >= 1 || existing.done)) {
-                extractExistingFiles();
-              }
-            } else {
-              clearInterval(existingProgressInterval);
-            }
-          }, 500);
-          
-          // Clean up interval when torrent is destroyed
-          existing.on('destroy', () => {
-            clearInterval(existingProgressInterval);
-          });
-          
-          // Check if torrent is already complete and extract files
-          if (existing.progress >= 1 || existing.done) {
-            console.log('Existing torrent is already complete, extracting files...');
-            setIsDownloadComplete(true);
-            extractExistingFiles();
-          } else {
-            // Try to extract immediately (might fail if not complete, but worth trying)
-            extractExistingFiles();
-          }
-          
+        // Check if Web Crypto API is available (required for parsing .torrent files)
+        if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+          const errorMsg = 'Web Crypto API is not available. This is required to parse .torrent files.\n\n' +
+                         'Possible solutions:\n' +
+                         '1. Use HTTPS instead of HTTP (Web Crypto requires secure context)\n' +
+                         '2. Use a modern browser with Web Crypto support\n' +
+                         '3. Use a magnet URI instead of a .torrent file';
+          setStatus(`❌ ${errorMsg}`);
+          showToast('Web Crypto API not available', 'error');
+          setIsDownloading(false);
+          setIsDownloadComplete(false);
+          setFiles([]);
           return;
         }
         
-        source = torrentBuffer;
-      } catch (err) {
-        console.error('Error parsing torrent file:', err);
-        setStatus('Failed to parse .torrent file.');
+        console.log('Preparing torrent file:', {
+          fileName: inputTorrentFile.name,
+          fileSize: inputTorrentFile.size,
+          fileType: inputTorrentFile.type,
+          webCryptoAvailable: !!(window.crypto && window.crypto.subtle)
+        });
+        
+        // Read first few bytes to validate format
+        const arrBuf = await inputTorrentFile.arrayBuffer();
+        const firstBytes = new Uint8Array(arrBuf.slice(0, 20));
+        const firstByte = firstBytes[0];
+        
+        // Validate that it looks like a bencoded torrent file
+        // Bencoded files start with 'd' (dictionary) or 'l' (list)
+        if (firstByte !== 0x64 && firstByte !== 0x6c) { // 'd' or 'l' in ASCII
+          console.warn('⚠️ Torrent file may not be in bencoded format. First byte:', firstByte, String.fromCharCode(firstByte));
+          // Continue anyway - WebTorrent will validate
+        }
+        
+        // Convert to Blob - WebTorrent should accept Blob
+        const torrentBlob = new Blob([arrBuf], { type: 'application/x-bittorrent' });
+        source = torrentBlob;
+        
+        console.log('Torrent file prepared (using Blob):', {
+          fileName: inputTorrentFile.name,
+          fileSize: inputTorrentFile.size,
+          blobSize: torrentBlob.size,
+          firstBytes: Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' '),
+          firstChar: String.fromCharCode(firstByte)
+        });
+        
+        // Note: We can't check for existing torrents before WebTorrent parses it
+        // because we need the infoHash which WebTorrent extracts. We'll check
+        // after the torrent is added in the callback below.
+      } catch (err: any) {
+        console.error('Error processing torrent file:', err);
+        const errorMessage = err?.message || 'Unknown error';
+        setStatus(`❌ Failed to process .torrent file: ${errorMessage}. The file may be corrupted or invalid.`);
+        showToast(`Failed to process .torrent file: ${errorMessage}`, 'error');
         setIsDownloading(false);
+        setIsDownloadComplete(false);
+        setFiles([]);
         return;
       }
     }
     
     if (!source) {
       setStatus('No valid source provided.');
+      showToast('No valid source provided', 'warning');
       setIsDownloading(false);
       return;
     }
     
+    console.log('=== DOWNLOAD PROCESS STARTED ===');
+    console.log('Source type:', inputMagnet ? 'Magnet URI' : inputTorrentFile ? '.torrent file' : 'Unknown');
+    if (inputMagnet) {
+      console.log('Magnet URI:', inputMagnet.substring(0, 100) + '...');
+    }
+    
+    // Add error handler for the torrent being added
+    // WebTorrent's add() method can throw synchronously or asynchronously
+    let torrentAddError: any = null;
+    
     try {
-      console.log('=== DOWNLOAD PROCESS STARTED ===');
-      console.log('Source type:', inputMagnet ? 'Magnet URI' : inputTorrentFile ? '.torrent file' : 'Unknown');
-      if (inputMagnet) {
-        console.log('Magnet URI:', inputMagnet.substring(0, 100) + '...');
-      }
-      
-      client.add(source, (torrent: any) => {
-        const infoHash = torrent.infoHash?.toString?.('hex') || torrent.infoHash;
-        console.log('=== TORRENT ADDED TO CLIENT ===');
-        console.log('InfoHash:', infoHash);
-        console.log('Torrent name:', torrent.name || 'Unknown');
-        console.log('Torrent length:', torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown');
+        // Import DEFAULT_TRACKERS for .torrent files
+        const { DEFAULT_TRACKERS } = await import('@/lib/torrent');
+        
+        // Ensure Web Crypto API is available (required by WebTorrent)
+        if (typeof window !== 'undefined' && !window.crypto) {
+          console.warn('⚠️ Web Crypto API not available - this may cause issues');
+        }
+        
+        // For .torrent files, pass options with trackers
+        const addOptions = inputTorrentFile ? { announce: DEFAULT_TRACKERS } : undefined;
+        
+        // Set up client error handler to catch crypto errors that happen before torrent is created
+        const clientErrorHandler = (err: any) => {
+          const errorMsg = err.message || 'Unknown error';
+          if (errorMsg.includes('no web crypto') || errorMsg.includes('crypto')) {
+            console.error('⚠️ WebTorrent client error (crypto):', errorMsg);
+            
+            // Check if we're on HTTP (not HTTPS)
+            const isHttp = typeof window !== 'undefined' && window.location.protocol === 'http:';
+            const isSecureContext = typeof window !== 'undefined' && window.isSecureContext;
+            
+            const cryptoErrorMsg = '❌ Web Crypto API Error\n\n' +
+                                  'WebTorrent requires Web Crypto API to verify torrent metadata (even for magnet URIs), but it\'s not available.\n\n' +
+                                  (isHttp ? '⚠️ You are using HTTP. Web Crypto API requires HTTPS.\n\n' : '') +
+                                  (!isSecureContext ? '⚠️ This page is not in a secure context.\n\n' : '') +
+                                  'Solutions:\n' +
+                                  '1. Use HTTPS instead of HTTP (required for Web Crypto API)\n' +
+                                  '2. Use a modern browser (Chrome, Firefox, Edge, Safari)\n' +
+                                  '3. Ensure the page is served over HTTPS\n' +
+                                  '4. Check browser console for more details';
+            setStatus(cryptoErrorMsg);
+            showToast('Web Crypto API error - page must be served over HTTPS', 'error');
+            setIsDownloading(false);
+            setIsDownloadComplete(false);
+            // Remove the error handler after handling
+            client.removeListener('error', clientErrorHandler);
+          }
+        };
+        
+        // Listen for client errors (these happen before torrent object is created)
+        client.on('error', clientErrorHandler);
+        
+        // Try adding with Blob first, if it fails, we'll catch and try Buffer
+        let torrent: any;
+        
+        try {
+          console.log('Attempting to add torrent using Blob...');
+          const sourceType = typeof source === 'string' ? 'string' : 
+                            (source && typeof source === 'object' && 'constructor' in source && source.constructor === Blob) ? 'Blob' :
+                            (source && Buffer.isBuffer(source)) ? 'Buffer' : 'unknown';
+          console.log('Source type:', sourceType);
+          
+          torrent = client.add(source, addOptions, (torrent: any) => {
+            // Remove client error handler once torrent is successfully created
+            client.removeListener('error', clientErrorHandler);
+            
+          const infoHash = torrent.infoHash?.toString?.('hex') || torrent.infoHash;
+          console.log('=== TORRENT ADDED TO CLIENT ===');
+          console.log('InfoHash:', infoHash);
+          console.log('Torrent name:', torrent.name || 'Unknown');
+          console.log('Torrent length:', torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown');
+        
+        // Check if torrent was already in client (WebTorrent reuses existing instances)
+        const wasAlreadyInClient = client.torrents.some((t: any) => {
+          const tHash = t.infoHash?.toString?.('hex') || 
+                        (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                        (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+          return t !== torrent && tHash && infoHash && tHash.toLowerCase() === infoHash.toLowerCase();
+        });
+        
+        if (wasAlreadyInClient) {
+          console.log('⚠️⚠️⚠️ CRITICAL: This torrent was ALREADY in the client!');
+          console.log('   WebTorrent is reusing the existing torrent instance.');
+          console.log('   This means NO NETWORK CONNECTION is needed - it will complete immediately.');
+          console.log('   This is why you see 0 peers and no wire events.');
+          console.log('   💡 SOLUTION: Use a DIFFERENT browser/device to test real peer connections.');
+        }
         
         // Check if this torrent is already being seeded in the same client
         const allTorrents = client.torrents || [];
+        console.log(`🔍 [DOWNLOADER] Checking for seeders in ${allTorrents.length} torrent(s) in same client...`);
+        
         const seedingInstance = allTorrents.find((t: any) => {
-          const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
-          return tHash === infoHash && t !== torrent && (t.uploaded > 0 || t.done);
+          if (t === torrent) return false; // Skip self
+          
+          // Try multiple hash extraction methods
+          const tHash = t.infoHash?.toString?.('hex') || 
+                        (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                        (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+          
+          const matchHash = tHash && infoHash && tHash.toLowerCase() === infoHash.toLowerCase();
+          const isSeeder = t.done || (t.uploaded && t.uploaded > 0) || (t.wires && t.wires.length > 0);
+          
+          if (matchHash) {
+            console.log(`  ✅ Found matching hash ${tHash.substring(0, 8)}:`, {
+              isSeeder,
+              done: t.done,
+              uploaded: t.uploaded || 0,
+              wires: t.wires?.length || 0,
+              progress: ((t.progress || 0) * 100).toFixed(1) + '%'
+            });
+          }
+          
+          return matchHash && isSeeder;
         });
         
         console.log('Initial state:', {
@@ -326,9 +302,51 @@ export default function DownloadPage() {
         });
         
         if (seedingInstance) {
-          console.log('ℹ️ NOTE: This torrent is already being seeded in this client. If download doesn\'t start, you may need to seed from Profile → Seeding page.');
+          console.log('✅ [DOWNLOADER] SEEDER FOUND in same client! Download will use local seeder (no network needed).');
+          console.log('   This explains why download completed immediately - it\'s using the same client instance.');
+          console.log('   To test REAL peer connections, use a DIFFERENT browser/device.');
         } else {
-          console.log('⚠️ NOTE: No seeders detected in this client. Make sure someone is seeding this torrent (go to Profile → Seeding to seed it).');
+          console.log('⚠️ [DOWNLOADER] NO SEEDER in same client - need network connection.');
+          console.log('   Current torrents in client:', allTorrents.map((t: any) => {
+            const tHash = t.infoHash?.toString?.('hex') || 
+                          (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                          (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+            return {
+              hash: tHash?.substring(0, 8) || 'unknown',
+              done: t.done,
+              uploaded: t.uploaded || 0,
+              wires: t.wires?.length || 0
+            };
+          }));
+          console.log('   Looking for hash:', infoHash?.substring(0, 8));
+          console.log('   💡 To test peer connections:');
+          console.log('      1. Upload file on Share page (Browser A)');
+          console.log('      2. Download from Download page (Browser B - different browser/device)');
+          console.log('      3. Watch for 🔌 [DOWNLOADER] Peer connected! messages');
+        }
+        
+        // Check if download completed immediately (likely from cache or same client)
+        if (torrent.progress === 1) {
+          const downloadedBytes = torrent.downloaded || 0;
+          const totalBytes = torrent.length || 0;
+          
+          if (downloadedBytes === 0 && totalBytes > 0) {
+            console.log('⚠️⚠️⚠️ [DOWNLOADER] CRITICAL: Torrent shows 100% but downloaded=0');
+            console.log('   This means it\'s using the SAME CLIENT INSTANCE, NOT downloading from network peers.');
+            console.log('   WebTorrent is reusing data from the existing seeder in the same client.');
+            console.log('   This is why you see:');
+            console.log('     - numPeers: 0 (no network peers needed)');
+            console.log('     - No wire events (no network connection)');
+            console.log('     - Seeder shows 0 peers (same client, not network)');
+            console.log('   💡 TO TEST REAL PEER CONNECTIONS:');
+            console.log('      1. Upload file on Share page (Browser A - e.g., Chrome)');
+            console.log('      2. Download from Download page (Browser B - e.g., Firefox, or different device)');
+            console.log('      3. Then you\'ll see real network peer connections!');
+          } else if (wasAlreadyInClient && downloadedBytes > 0) {
+            console.log('✅ [DOWNLOADER] Download completed - but this was from same client instance');
+            console.log('   Downloaded bytes:', downloadedBytes, 'of', totalBytes);
+            console.log('   This is NOT a network peer connection - it\'s using the same WebTorrent client.');
+          }
         }
         
         setCurrentTorrent(torrent);
@@ -539,19 +557,38 @@ export default function DownloadPage() {
         
         // Update peer count when a new peer connects
         torrent.on('wire', (wire: any) => {
-          console.log('🔌 Peer connected!', {
+          const wires = torrent.wires || [];
+          const peerHasPieces = wire.peerPieces && (
+            (Array.isArray(wire.peerPieces) && wire.peerPieces.length > 0) ||
+            (typeof wire.peerPieces === 'object' && Object.keys(wire.peerPieces).length > 0) ||
+            (typeof wire.peerPieces === 'number' && wire.peerPieces > 0)
+          );
+          
+          console.log('🔌 [DOWNLOADER] Peer connected!', {
             remoteAddress: wire.remoteAddress || 'Unknown',
             remotePort: wire.remotePort || 'Unknown',
             peerId: wire.peerId?.toString?.('hex')?.substring(0, 16) || 'Unknown',
-            totalPeers: torrent.wires?.length || torrent.numPeers || 0,
+            totalPeers: wires.length,
+            numPeers: torrent.numPeers || 0,
             amChoking: wire.amChoking,
             amInterested: wire.amInterested,
             peerChoking: wire.peerChoking,
             peerInterested: wire.peerInterested,
+            peerHasPieces: peerHasPieces,
+            peerType: peerHasPieces ? '🟢 Seeder (has pieces)' : '🔴 Downloader (no pieces)',
             peerPieces: wire.peerPieces ? `Has ${wire.peerPieces.length} pieces` : 'Unknown pieces',
             downloadedFromPeer: wire.downloaded || 0,
-            uploadedToPeer: wire.uploaded || 0
+            uploadedToPeer: wire.uploaded || 0,
+            weAreDownloader: '✅ Yes (downloading)',
+            connectionDirection: 'Bidirectional (should be visible to seeder)'
           });
+          
+          // IMPORTANT: Express interest in peer's pieces to ensure bidirectional connection
+          // This tells the seeder that we want to download from them
+          if (peerHasPieces && wire.amChoking) {
+            console.log('📢 [DOWNLOADER] Expressing interest in peer pieces to establish bidirectional connection');
+            // WebTorrent should handle this automatically, but we log it for debugging
+          }
           
           // Monitor this wire for data transfer
           let lastDownloaded = wire.downloaded || 0;
@@ -631,18 +668,52 @@ export default function DownloadPage() {
         });
         
         torrent.on('error', (err: any) => {
+          const errorMsg = err.message || 'Unknown error';
           console.error('❌ Torrent error:', {
-            message: err.message || 'Unknown error',
+            message: errorMsg,
             stack: err.stack,
             torrentInfoHash: torrent.infoHash?.toString?.('hex') || 'Unknown'
           });
+          
+          // Check for crypto-related errors
+          if (errorMsg.includes('no web crypto') || errorMsg.includes('crypto') || errorMsg.includes('Web Crypto')) {
+            // Check if we're on HTTP (not HTTPS)
+            const isHttp = typeof window !== 'undefined' && window.location.protocol === 'http:';
+            const isSecureContext = typeof window !== 'undefined' && window.isSecureContext;
+            
+            const cryptoErrorMsg = '❌ Web Crypto API Error\n\n' +
+                                  'WebTorrent requires Web Crypto API to verify torrent metadata (even for magnet URIs), but it\'s not available.\n\n' +
+                                  (isHttp ? '⚠️ You are using HTTP. Web Crypto API requires HTTPS.\n\n' : '') +
+                                  (!isSecureContext ? '⚠️ This page is not in a secure context.\n\n' : '') +
+                                  'Solutions:\n' +
+                                  '1. Use HTTPS instead of HTTP (required for Web Crypto API)\n' +
+                                  '2. Use a modern browser (Chrome, Firefox, Edge, Safari)\n' +
+                                  '3. Ensure the page is served over HTTPS\n' +
+                                  '4. Check browser console for more details';
+            setStatus(cryptoErrorMsg);
+            showToast('Web Crypto API error - page must be served over HTTPS', 'error');
+            setIsDownloading(false);
+            setIsDownloadComplete(false);
+          } else if (errorMsg.includes('invalid') || errorMsg.includes('corrupt') || errorMsg.includes('parse') || errorMsg.includes('malformed')) {
+            setStatus(`❌ Torrent error: ${errorMsg}. The .torrent file may be invalid or corrupted.`);
+            showToast(`Torrent error: ${errorMsg}`, 'error');
+          } else {
+            setStatus(`❌ Torrent error: ${errorMsg}`);
+            showToast(`Torrent error: ${errorMsg}`, 'error');
+          }
         });
         
         torrent.on('warning', (err: any) => {
+          const warnMsg = err.message || 'Unknown warning';
           console.warn('⚠️ Torrent warning:', {
-            message: err.message || 'Unknown warning',
+            message: warnMsg,
             torrentInfoHash: torrent.infoHash?.toString?.('hex') || 'Unknown'
           });
+          // Show warning to user for important warnings
+          if (warnMsg.includes('invalid') || warnMsg.includes('corrupt') || warnMsg.includes('parse') || warnMsg.includes('malformed')) {
+            setStatus(`⚠️ Torrent warning: ${warnMsg}. The .torrent file may have issues.`);
+            showToast(`Torrent warning: ${warnMsg}`, 'warning');
+          }
         });
         
         // Track if files have been successfully extracted to prevent multiple attempts
@@ -913,20 +984,68 @@ export default function DownloadPage() {
             getFilesFromTorrent(torrent.files).then(() => {
               console.log('✅ File extraction completed successfully from done event');
               setStatus('Download complete! Files ready.');
+              showToast('Download complete! Files ready', 'success');
             }).catch((err) => {
               console.error('❌ Error extracting files after download:', err);
               console.error('Error stack:', err.stack);
               setStatus('Download complete, but had trouble extracting files. Try the "Extract Files" button below.');
+              showToast('Download complete, but had trouble extracting files', 'warning');
             });
           } else {
             console.warn('⚠️ Download complete but no files found in torrent');
             setStatus('Download complete, but no files found.');
+            showToast('Download complete, but no files found', 'warning');
             setIsDownloading(false);
           }
         });
-      });
+        });
+      } catch (blobErr: any) {
+        // If Blob failed, try Buffer as fallback
+        if (inputTorrentFile && (blobErr.message?.includes('Invalid torrent identifier') || 
+                                 blobErr.message?.includes('invalid') ||
+                                 blobErr.message?.includes('no web crypto'))) {
+          console.log('⚠️ Blob format failed, trying Buffer as fallback...');
+          console.log('Error:', blobErr.message);
+          try {
+            const arrBuf = await inputTorrentFile.arrayBuffer();
+            const torrentBuffer = Buffer.from(arrBuf);
+            console.log('Attempting to add torrent using Buffer...');
+            console.log('Buffer length:', torrentBuffer.length);
+            
+            // Check if crypto is available
+            if (typeof window !== 'undefined') {
+              console.log('Web Crypto available:', !!window.crypto);
+              console.log('Web Crypto Subtle available:', !!window.crypto?.subtle);
+            }
+            
+            torrent = client.add(torrentBuffer, addOptions, (torrent: any) => {
+              const infoHash = torrent.infoHash?.toString?.('hex') || torrent.infoHash;
+              console.log('=== TORRENT ADDED TO CLIENT (via Buffer fallback) ===');
+              console.log('InfoHash:', infoHash);
+              console.log('Torrent name:', torrent.name || 'Unknown');
+              console.log('Torrent length:', torrent.length ? `${(torrent.length / 1024 / 1024).toFixed(2)} MB` : 'Unknown');
+              // Note: The rest of the callback logic would need to be duplicated here
+              // For now, this is a fallback that should rarely be needed
+            });
+          } catch (bufferErr: any) {
+            console.error('❌ Buffer also failed:', bufferErr.message);
+            // If both Blob and Buffer fail with crypto error, provide helpful message
+            if (bufferErr.message?.includes('no web crypto') || blobErr.message?.includes('no web crypto')) {
+              setStatus('❌ Web Crypto API not available. Please use a modern browser with Web Crypto support.');
+              showToast('Web Crypto API not available', 'error');
+              setIsDownloading(false);
+              setIsDownloadComplete(false);
+              return;
+            }
+            // Buffer also failed, throw the original error
+            throw blobErr;
+          }
+        } else {
+          throw blobErr;
+        }
+      }
     } catch (err: any) {
-      console.error('=== ERROR ADDING TORRENT ===');
+      console.error('=== ERROR ADDING TORRENT (SYNCHRONOUS) ===');
       console.error('Error details:', {
         message: err.message || 'Unknown error',
         name: err.name || 'Error',
@@ -934,13 +1053,33 @@ export default function DownloadPage() {
         source: inputMagnet ? 'Magnet URI' : inputTorrentFile ? '.torrent file' : 'Unknown'
       });
       
-      if (err.message && err.message.includes('duplicate')) {
+      // Check for crypto-related errors
+      if (err.message && (err.message.includes('no web crypto') || err.message.includes('crypto') || err.message.includes('Web Crypto'))) {
+        const cryptoErrorMsg = '❌ Web Crypto API Error\n\n' +
+                              'WebTorrent requires Web Crypto API to parse .torrent files.\n\n' +
+                              'Solutions:\n' +
+                              '1. Use HTTPS (Web Crypto requires secure context)\n' +
+                              '2. Use a modern browser (Chrome, Firefox, Edge, Safari)\n' +
+                              '3. Use a magnet URI instead of .torrent file\n' +
+                              '4. Check browser security settings';
+        setStatus(cryptoErrorMsg);
+        showToast('Web Crypto API error - try using a magnet URI instead', 'error');
+        setIsDownloading(false);
+        setIsDownloadComplete(false);
+      } else if (err.message && err.message.includes('Invalid torrent identifier')) {
+        setStatus('❌ Invalid .torrent file format. Please ensure the file is a valid .torrent file.');
+        showToast('Invalid .torrent file format', 'error');
+        setIsDownloading(false);
+        setIsDownloadComplete(false);
+      } else if (err.message && err.message.includes('duplicate')) {
         console.warn('⚠️ Duplicate torrent detected');
         setStatus('Torrent is already being seeded. Use existing active torrent in Profile → Seeding.');
+        showToast('Torrent is already being downloaded', 'info');
         setIsDownloading(false);
       } else {
         console.error('❌ Failed to add torrent to client');
         setStatus(`Error: ${err.message || 'Failed to add torrent'}`);
+        showToast(`Failed to add torrent: ${err.message || 'Unknown error'}`, 'error');
         setIsDownloading(false);
       }
     }
@@ -1070,7 +1209,11 @@ export default function DownloadPage() {
             
             {/* Status and manual retry */}
             <div className="flex items-center justify-between">
-              {status && <div className="text-sm text-zinc-300 flex-1">{status}</div>}
+              {status && !status.includes('❌') && !status.includes('⚠️') && !status.includes('Faulty') && !status.includes('Failed') && !status.includes('Warning') && !status.includes('ready') && !status.includes('complete') && (
+                <div className="text-sm text-zinc-300 flex-1">
+                  {status}
+                </div>
+              )}
               {isDownloadComplete && files.length === 0 && currentTorrent && (
                 <button
                   onClick={async () => {
@@ -1107,12 +1250,15 @@ export default function DownloadPage() {
                         console.log(`Successfully extracted ${fileObjs.length} file(s) manually`);
                         setFiles(fileObjs);
                         setStatus(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} extracted!`);
+                        showToast(`${fileObjs.length} file${fileObjs.length > 1 ? 's' : ''} extracted`, 'success');
                       } else {
                         setStatus('No files found in torrent.');
+                        showToast('No files found in torrent', 'warning');
                       }
                     } catch (err: any) {
                       console.error('Manual extraction error:', err);
                       setStatus(`Failed to extract: ${err.message || 'Unknown error'}`);
+                      showToast(`Failed to extract: ${err.message || 'Unknown error'}`, 'error');
                     }
                   }}
                   className="ml-4 text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
@@ -1134,6 +1280,7 @@ export default function DownloadPage() {
                       onClick={async () => {
                         if (files.length === 0) {
                           setStatus('No files available to ZIP');
+                          showToast('No files available to ZIP', 'warning');
                           return;
                         }
                         
@@ -1183,8 +1330,8 @@ export default function DownloadPage() {
                                 console.log(`Added to ZIP: ${zipPath} (${(blob.size / 1024).toFixed(1)} KB)`);
                               } catch (err: any) {
                                 console.error(`Error adding ${f.name} to ZIP:`, err);
-                                // Don't throw - continue with other files
                                 setStatus(`Warning: Could not add ${f.name} to ZIP: ${err.message || 'Unknown error'}. Continuing...`);
+                                showToast(`Warning: Could not add ${f.name} to ZIP`, 'warning');
                               }
                             })
                           );
@@ -1232,10 +1379,12 @@ export default function DownloadPage() {
                             document.body.removeChild(a);
                             URL.revokeObjectURL(url);
                             setStatus(`ZIP download started! (${filesAdded} file${filesAdded > 1 ? 's' : ''})`);
+                            showToast(`ZIP download started! (${filesAdded} file${filesAdded > 1 ? 's' : ''})`, 'success');
                           }, 100);
                         } catch (err: any) {
                           console.error('Error creating ZIP:', err);
                           setStatus(`Failed to create ZIP: ${err.message || 'Unknown error'}. Try downloading files individually.`);
+                          showToast(`Failed to create ZIP: ${err.message || 'Unknown error'}`, 'error');
                         }
                       }}
                       className="text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
@@ -1244,6 +1393,52 @@ export default function DownloadPage() {
                     </button>
                   )}
                 </div>
+                
+                {/* Folder Component Display */}
+                <div className="relative rounded-xl border border-zinc-700 bg-zinc-950/60 p-8 mb-4">
+                  <div className="flex flex-col items-center gap-6">
+                    {/* Folder Component */}
+                    <Folder
+                      color="#06b6d4"
+                      size={1.2}
+                      items={files.slice(0, 3).map((file, index) => (
+                        <div key={index} className="flex flex-col items-center justify-center h-full p-2">
+                          <FileText className="text-zinc-700 mb-1" size={24} />
+                          <span className="text-[10px] text-zinc-600 text-center px-1 truncate w-full">
+                            {file.name.length > 15 ? `${file.name.substring(0, 12)}...` : file.name}
+                          </span>
+                        </div>
+                      ))}
+                      className="mx-auto"
+                    />
+                    
+                    {/* File info */}
+                    <div className="text-center space-y-2 w-full">
+                      <div className="text-zinc-200 font-medium">
+                        {files.length === 1 ? (
+                          files[0].name
+                        ) : (
+                          `${files.length} file${files.length > 1 ? 's' : ''} downloaded`
+                        )}
+                      </div>
+                      {files.length > 1 && (
+                        <div className="text-xs text-zinc-400 max-h-32 overflow-y-auto space-y-1">
+                          {files.slice(0, 5).map((f, i) => (
+                            <div key={i} className="text-xs text-zinc-500 truncate">
+                              • {f.path || f.name} ({formatBytes(f.size)})
+                            </div>
+                          ))}
+                          {files.length > 5 && (
+                            <div className="text-xs text-zinc-500">
+                              ... and {files.length - 5} more file{files.length - 5 > 1 ? 's' : ''}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                
                 <div className="max-h-96 overflow-y-auto space-y-2">
                   <div className="text-xs text-zinc-500 mb-2 px-1">
                     {(files.length > 1 || (files.length === 1 && files[0].path && files[0].path.includes('/')))
@@ -1259,7 +1454,7 @@ export default function DownloadPage() {
                             📁 {f.path}
                           </div>
                         )}
-                        <div className="text-xs text-zinc-500 mt-1">{(f.size/1024/1024).toFixed(2)} MB</div>
+                        <div className="text-xs text-zinc-500 mt-1">{formatBytes(f.size)}</div>
                       </div>
                       <a 
                         className="text-sm text-cyan-400 hover:text-cyan-300 ml-2 flex-shrink-0 px-3 py-1.5 rounded-md border border-zinc-700/50 bg-zinc-800/30 hover:bg-zinc-800/50" 

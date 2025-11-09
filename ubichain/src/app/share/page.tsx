@@ -1,14 +1,29 @@
 "use client";
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import AuthService from '@/lib/auth';
 import { getWebTorrentClient } from '@/lib/torrent';
 import createTorrent from 'create-torrent';
 import { getContracts } from '@/lib/web3';
 import { useImageUpload } from '@/hooks/use-image-upload';
-import { ImagePlus, Upload } from 'lucide-react';
+import { ImagePlus, Upload, FileText, Loader2 } from 'lucide-react';
 import { v4 as uuidv4 } from "uuid";
 import { supabase } from '@/lib/supabase/client';
 import { Buffer } from 'buffer';
+import { useToast } from '@/components/ui/toast-1';
+import Folder from '@/components/Folder';
+import { WalletConnect } from '@/components/ui/wallet-connect';
+import { useWallet } from '@/hooks/use-wallet';
+import { registerFileOnChain } from '@/lib/blockchain';
+
+// Helper function to format bytes to human-readable size (KB, MB, GB, TB)
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
 
 // Helper to upload .torrent file to Supabase Storage and return public URL (with user session)
 async function uploadTorrentToSupabaseStorage(file: File, userId: string) {
@@ -51,7 +66,278 @@ export default function SharePage() {
   const [seedingTorrents, setSeedingTorrents] = useState<any[]>([]);
   const [seedingStatus, setSeedingStatus] = useState<string>("");
   const [duplicateMessage, setDuplicateMessage] = useState<string>("");
-  const [peerStats, setPeerStats] = useState<Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }>>({});
+  const [peerStats, setPeerStats] = useState<Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }>>({});
+  const [statsUpdateCounter, setStatsUpdateCounter] = useState(0); // Force re-renders
+  const { showToast } = useToast();
+  const wallet = useWallet();
+  const [isRegistering, setIsRegistering] = useState(false);
+  
+  // Real-time peer stats polling for all seeding torrents
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    const cleanupFunctions: (() => void)[] = [];
+    
+    const updateAllPeerStats = () => {
+      const client = (window as any).__webtorrentClient;
+      if (!client) {
+        console.log('⚠️ No WebTorrent client available for peer stats update');
+        return;
+      }
+      
+      const torrents = client.torrents || [];
+      const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+      
+      // Helper to check if peer has pieces
+      const peerHasPieces = (w: any) => {
+        if (!w || !w.peerPieces) return false;
+        if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+        if (typeof w.peerPieces === 'object') {
+          if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+          if (Object.keys(w.peerPieces).length > 0) return true;
+          try {
+            if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+            if (typeof w.peerPieces.toString === 'function') {
+              return w.peerPieces.toString().includes('1');
+            }
+          } catch (e) {}
+        }
+        if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+        return false;
+      };
+      
+      torrents.forEach((t: any) => {
+        if (t && !t.destroyed) {
+          // Consistent infoHash extraction
+          const tHash = t.infoHash?.toString?.('hex') || 
+                        (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                        (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+          
+          if (!tHash) return;
+          
+          const wires = t.wires || [];
+          const seeders = wires.filter(peerHasPieces).length;
+          const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+          const peers = t.numPeers || wires.length || 0;
+          
+          newPeerStats[tHash] = {
+            peers,
+            downloadSpeed: t.downloadSpeed || 0,
+            uploadSpeed: t.uploadSpeed || 0,
+            seeders,
+            downloaders
+          };
+          
+          // Log updates for debugging - always log to see what's happening
+          console.log(`📊 Peer stats update for ${tHash.substring(0, 8)}:`, {
+            peers,
+            seeders,
+            downloaders,
+            uploadSpeed: `${((t.uploadSpeed || 0) / 1024).toFixed(2)} KB/s`,
+            wiresLength: wires.length,
+            numPeers: t.numPeers,
+            wiresArray: wires.map((w: any) => ({
+              peerId: w.peerId?.toString?.('hex')?.substring(0, 8) || 'unknown',
+              hasPieces: peerHasPieces(w),
+              uploaded: w.uploaded || 0,
+              downloaded: w.downloaded || 0
+            }))
+          });
+        }
+      });
+      
+      // Check if stats actually changed
+      let statsChanged = false;
+      if (Object.keys(peerStats).length !== Object.keys(newPeerStats).length) {
+        statsChanged = true;
+      } else {
+        for (const [hash, newStat] of Object.entries(newPeerStats)) {
+          const oldStat = peerStats[hash];
+          if (!oldStat || 
+              oldStat.peers !== newStat.peers ||
+              oldStat.seeders !== newStat.seeders ||
+              oldStat.downloaders !== newStat.downloaders) {
+            statsChanged = true;
+            break;
+          }
+        }
+      }
+      
+      // Always update state to trigger re-render (React will handle deduplication)
+      setPeerStats(newPeerStats);
+      
+      // Force re-render by updating counter (always increment to ensure UI updates)
+      setStatsUpdateCounter(prev => prev + 1);
+      
+      // Log if there are any peers or if stats changed
+      const totalPeers = Object.values(newPeerStats).reduce((sum, s) => sum + s.peers, 0);
+      const totalSeeders = Object.values(newPeerStats).reduce((sum, s) => sum + s.seeders, 0);
+      const totalDownloaders = Object.values(newPeerStats).reduce((sum, s) => sum + s.downloaders, 0);
+      
+      if (totalPeers > 0 || totalSeeders > 0 || totalDownloaders > 0 || statsChanged) {
+        console.log(`📊 Total peer stats: ${totalPeers} peers, ${totalSeeders} seeders, ${totalDownloaders} downloaders (changed: ${statsChanged})`);
+      }
+      
+      // Log detailed wire information for debugging
+      torrents.forEach((t: any) => {
+        if (t && !t.destroyed) {
+          const wires = t.wires || [];
+          if (wires.length > 0) {
+            const tHash = t.infoHash?.toString?.('hex') || 
+                          (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                          (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+            console.log(`🔍 DETAILED WIRES for ${tHash?.substring(0, 8) || 'unknown'}:`, {
+              wiresCount: wires.length,
+              numPeers: t.numPeers,
+              wires: wires.map((w: any, idx: number) => ({
+                index: idx,
+                peerId: w.peerId?.toString?.('hex')?.substring(0, 16) || 'unknown',
+                peerPieces: w.peerPieces ? (Array.isArray(w.peerPieces) ? w.peerPieces.length : 'object') : 'none',
+                uploaded: w.uploaded || 0,
+                downloaded: w.downloaded || 0,
+                amChoking: w.amChoking,
+                peerChoking: w.peerChoking,
+                amInterested: w.amInterested,
+                peerInterested: w.peerInterested,
+                remoteAddress: w.remoteAddress || 'unknown',
+                remotePort: w.remotePort || 'unknown'
+              }))
+            });
+          }
+        }
+      });
+    };
+    
+    const attachListenersToTorrents = () => {
+      const client = (window as any).__webtorrentClient;
+      if (!client) return;
+      
+      const torrents = client.torrents || [];
+      console.log(`🔌 Attaching peer stats listeners to ${torrents.length} torrent(s)`);
+      
+      torrents.forEach((t: any) => {
+        if (t && !t.destroyed && typeof t.on === 'function') {
+          // Check if listeners already attached (avoid duplicates)
+          if ((t as any).__peerStatsListenersAttached) return;
+          
+          const onPeer = (peerId: any) => {
+            console.log('👤 Peer discovered - updating peer stats', {
+              torrentHash: (t.infoHash?.toString?.('hex') || t.infoHash || 'unknown').substring(0, 8),
+              peerId: peerId?.toString?.('hex')?.substring(0, 16) || 'unknown',
+              currentWires: (t.wires || []).length
+            });
+            updateAllPeerStats();
+          };
+          const onWire = (wire: any) => {
+            const wires = t.wires || [];
+            console.log('🔌 Wire event - updating peer stats', {
+              torrentHash: (t.infoHash?.toString?.('hex') || t.infoHash || 'unknown').substring(0, 8),
+              peerId: wire?.peerId?.toString?.('hex')?.substring(0, 16) || 'unknown',
+              totalWires: wires.length,
+              wireDetails: {
+                uploaded: wire?.uploaded || 0,
+                downloaded: wire?.downloaded || 0,
+                peerPieces: wire?.peerPieces ? 'has pieces' : 'no pieces'
+              }
+            });
+            updateAllPeerStats();
+          };
+          const onNoPeers = () => {
+            console.log('⚠️ NoPeers event - updating peer stats');
+            updateAllPeerStats();
+          };
+          const onDownload = () => updateAllPeerStats();
+          const onUpload = () => {
+            console.log('⬆️ Upload event - data being uploaded to peer!');
+            updateAllPeerStats();
+          };
+          
+          t.on('peer', onPeer);
+          t.on('wire', onWire);
+          t.on('noPeers', onNoPeers);
+          t.on('download', onDownload);
+          t.on('upload', onUpload);
+          
+          (t as any).__peerStatsListenersAttached = true;
+          (t as any).__peerStatsCleanup = () => {
+            try {
+              t.removeListener('peer', onPeer);
+              t.removeListener('wire', onWire);
+              t.removeListener('noPeers', onNoPeers);
+              t.removeListener('download', onDownload);
+              t.removeListener('upload', onUpload);
+              (t as any).__peerStatsListenersAttached = false;
+            } catch (e) {
+              console.error('Error removing peer stats listeners:', e);
+            }
+          };
+          
+          cleanupFunctions.push((t as any).__peerStatsCleanup);
+        }
+      });
+    };
+    
+    // Initial setup
+    const initialize = () => {
+      updateAllPeerStats();
+      attachListenersToTorrents();
+      
+      // Set up polling interval for real-time updates (every 1 second)
+      interval = setInterval(() => {
+        updateAllPeerStats();
+        // Re-attach listeners in case new torrents were added
+        attachListenersToTorrents();
+      }, 1000);
+    };
+    
+    // Wait a bit for client to be ready
+    const client = (window as any).__webtorrentClient;
+    if (client) {
+      initialize();
+    } else {
+      // Wait for client to be available
+      const checkClient = setInterval(() => {
+        const c = (window as any).__webtorrentClient;
+        if (c) {
+          clearInterval(checkClient);
+          initialize();
+        }
+      }, 100);
+      
+      cleanupFunctions.push(() => clearInterval(checkClient));
+    }
+    
+    // Also listen for new torrents being added to client
+    if (client && typeof client.on === 'function') {
+      const onTorrentAdd = () => {
+        console.log('➕ New torrent added to client - attaching listeners');
+        setTimeout(() => {
+          attachListenersToTorrents();
+          updateAllPeerStats();
+        }, 100);
+      };
+      
+      client.on('torrent', onTorrentAdd);
+      cleanupFunctions.push(() => {
+        try {
+          client.removeListener('torrent', onTorrentAdd);
+        } catch (e) {
+          console.error('Error removing torrent listener:', e);
+        }
+      });
+    }
+    
+    return () => {
+      console.log('🧹 Cleaning up peer stats polling');
+      if (interval) clearInterval(interval);
+      cleanupFunctions.forEach(cleanup => {
+        try {
+          cleanup();
+        } catch (e) {
+          console.error('Error in cleanup:', e);
+        }
+      });
+    };
+  }, [seedingTorrents.length]); // Re-run when number of seeding torrents changes
   
   useEffect(() => {
     if (!previewUrl) return;
@@ -90,18 +376,42 @@ export default function SharePage() {
               const client = (window as any).__webtorrentClient;
               if (client) {
                 const torrents = client.torrents || [];
-                const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                
+                const peerHasPieces = (w: any) => {
+                  if (!w || !w.peerPieces) return false;
+                  if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                  if (typeof w.peerPieces === 'object') {
+                    if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                    if (Object.keys(w.peerPieces).length > 0) return true;
+                    try {
+                      if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                      if (typeof w.peerPieces.toString === 'function') {
+                        return w.peerPieces.toString().includes('1');
+                      }
+                    } catch (e) {}
+                  }
+                  if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                  return false;
+                };
+                
                 torrents.forEach((t: any) => {
                   if (t && !t.destroyed) {
                     const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                    const wires = t.wires || [];
+                    const seeders = wires.filter(peerHasPieces).length;
+                    const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
                     newPeerStats[tHash] = {
-                      peers: t.numPeers || 0,
+                      peers: t.numPeers || wires.length || 0,
                       downloadSpeed: t.downloadSpeed || 0,
-                      uploadSpeed: t.uploadSpeed || 0
+                      uploadSpeed: t.uploadSpeed || 0,
+                      seeders,
+                      downloaders
                     };
                   }
                 });
                 setPeerStats(newPeerStats);
+                setStatsUpdateCounter(prev => prev + 1);
               }
             };
             
@@ -244,15 +554,42 @@ export default function SharePage() {
                   const client = (window as any).__webtorrentClient;
                   if (client) {
                     const torrents = client.torrents || [];
-                    const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                    const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                    
+                    const peerHasPieces = (w: any) => {
+                      if (!w || !w.peerPieces) return false;
+                      if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                      if (typeof w.peerPieces === 'object') {
+                        if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                        if (Object.keys(w.peerPieces).length > 0) return true;
+                        try {
+                          if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                          if (typeof w.peerPieces.toString === 'function') {
+                            return w.peerPieces.toString().includes('1');
+                          }
+                        } catch (e) {}
+                      }
+                      if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                      return false;
+                    };
+                    
                     torrents.forEach((t: any) => {
-                      newPeerStats[t.infoHash] = {
-                        peers: t.numPeers || 0,
-                        downloadSpeed: t.downloadSpeed || 0,
-                        uploadSpeed: t.uploadSpeed || 0
-                      };
+                      if (t && !t.destroyed) {
+                        const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                        const wires = t.wires || [];
+                        const seeders = wires.filter(peerHasPieces).length;
+                        const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                        newPeerStats[tHash] = {
+                          peers: t.numPeers || wires.length || 0,
+                          downloadSpeed: t.downloadSpeed || 0,
+                          uploadSpeed: t.uploadSpeed || 0,
+                          seeders,
+                          downloaders
+                        };
+                      }
                     });
                     setPeerStats(newPeerStats);
+                    setStatsUpdateCounter(prev => prev + 1);
                   }
                 };
                 
@@ -311,15 +648,42 @@ export default function SharePage() {
                       const client = (window as any).__webtorrentClient;
                       if (client) {
                         const torrents = client.torrents || [];
-                        const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                        const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                        
+                        const peerHasPieces = (w: any) => {
+                          if (!w || !w.peerPieces) return false;
+                          if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                          if (typeof w.peerPieces === 'object') {
+                            if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                            if (Object.keys(w.peerPieces).length > 0) return true;
+                            try {
+                              if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                              if (typeof w.peerPieces.toString === 'function') {
+                                return w.peerPieces.toString().includes('1');
+                              }
+                            } catch (e) {}
+                          }
+                          if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                          return false;
+                        };
+                        
                         torrents.forEach((t: any) => {
-                          newPeerStats[t.infoHash] = {
-                            peers: t.numPeers || 0,
-                            downloadSpeed: t.downloadSpeed || 0,
-                            uploadSpeed: t.uploadSpeed || 0
-                          };
+                          if (t && !t.destroyed) {
+                            const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                            const wires = t.wires || [];
+                            const seeders = wires.filter(peerHasPieces).length;
+                            const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                            newPeerStats[tHash] = {
+                              peers: t.numPeers || wires.length || 0,
+                              downloadSpeed: t.downloadSpeed || 0,
+                              uploadSpeed: t.uploadSpeed || 0,
+                              seeders,
+                              downloaders
+                            };
+                          }
                         });
                         setPeerStats(newPeerStats);
+                        setStatsUpdateCounter(prev => prev + 1);
                       }
                     };
                     
@@ -576,18 +940,42 @@ export default function SharePage() {
                         const client = (window as any).__webtorrentClient;
                         if (client) {
                           const torrents = client.torrents || [];
-                          const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                          const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                          
+                          const peerHasPieces = (w: any) => {
+                            if (!w || !w.peerPieces) return false;
+                            if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                            if (typeof w.peerPieces === 'object') {
+                              if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                              if (Object.keys(w.peerPieces).length > 0) return true;
+                              try {
+                                if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                                if (typeof w.peerPieces.toString === 'function') {
+                                  return w.peerPieces.toString().includes('1');
+                                }
+                              } catch (e) {}
+                            }
+                            if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                            return false;
+                          };
+                          
                           torrents.forEach((t: any) => {
                             if (t && !t.destroyed) {
                               const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                              const wires = t.wires || [];
+                              const seeders = wires.filter(peerHasPieces).length;
+                              const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
                               newPeerStats[tHash] = {
-                                peers: t.numPeers || 0,
+                                peers: t.numPeers || wires.length || 0,
                                 downloadSpeed: t.downloadSpeed || 0,
-                                uploadSpeed: t.uploadSpeed || 0
+                                uploadSpeed: t.uploadSpeed || 0,
+                                seeders,
+                                downloaders
                               };
                             }
                           });
                           setPeerStats(newPeerStats);
+                          setStatsUpdateCounter(prev => prev + 1);
                         }
                       };
                       
@@ -797,15 +1185,42 @@ export default function SharePage() {
                   const client = (window as any).__webtorrentClient;
                   if (client) {
                     const torrents = client.torrents || [];
-                    const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                    const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                    
+                    const peerHasPieces = (w: any) => {
+                      if (!w || !w.peerPieces) return false;
+                      if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                      if (typeof w.peerPieces === 'object') {
+                        if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                        if (Object.keys(w.peerPieces).length > 0) return true;
+                        try {
+                          if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                          if (typeof w.peerPieces.toString === 'function') {
+                            return w.peerPieces.toString().includes('1');
+                          }
+                        } catch (e) {}
+                      }
+                      if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                      return false;
+                    };
+                    
                     torrents.forEach((t: any) => {
-                      newPeerStats[t.infoHash] = {
-                        peers: t.numPeers || 0,
-                        downloadSpeed: t.downloadSpeed || 0,
-                        uploadSpeed: t.uploadSpeed || 0
-                      };
+                      if (t && !t.destroyed) {
+                        const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                        const wires = t.wires || [];
+                        const seeders = wires.filter(peerHasPieces).length;
+                        const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                        newPeerStats[tHash] = {
+                          peers: t.numPeers || wires.length || 0,
+                          downloadSpeed: t.downloadSpeed || 0,
+                          uploadSpeed: t.uploadSpeed || 0,
+                          seeders,
+                          downloaders
+                        };
+                      }
                     });
                     setPeerStats(newPeerStats);
+                    setStatsUpdateCounter(prev => prev + 1);
                   }
                 };
                 
@@ -932,18 +1347,42 @@ export default function SharePage() {
                       const client = (window as any).__webtorrentClient;
                       if (client) {
                         const torrents = client.torrents || [];
-                        const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
+                        const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                        
+                        const peerHasPieces = (w: any) => {
+                          if (!w || !w.peerPieces) return false;
+                          if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                          if (typeof w.peerPieces === 'object') {
+                            if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                            if (Object.keys(w.peerPieces).length > 0) return true;
+                            try {
+                              if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                              if (typeof w.peerPieces.toString === 'function') {
+                                return w.peerPieces.toString().includes('1');
+                              }
+                            } catch (e) {}
+                          }
+                          if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                          return false;
+                        };
+                        
                         torrents.forEach((t: any) => {
                           if (t && !t.destroyed) {
                             const tHash = t.infoHash?.toString?.('hex') || t.infoHash;
+                            const wires = t.wires || [];
+                            const seeders = wires.filter(peerHasPieces).length;
+                            const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
                             newPeerStats[tHash] = {
-                              peers: t.numPeers || 0,
+                              peers: t.numPeers || wires.length || 0,
                               downloadSpeed: t.downloadSpeed || 0,
-                              uploadSpeed: t.uploadSpeed || 0
+                              uploadSpeed: t.uploadSpeed || 0,
+                              seeders,
+                              downloaders
                             };
                           }
                         });
                         setPeerStats(newPeerStats);
+                        setStatsUpdateCounter(prev => prev + 1);
                       }
                     };
                     
@@ -1046,11 +1485,13 @@ export default function SharePage() {
     const { user, error } = await AuthService.getCurrentUser();
     if (!user || error) {
       setStatus('You must be signed in to share a file.');
+      showToast('You must be signed in to share a file', 'warning');
       return;
     }
     const userId = user.id;
     if (!userId) {
       setStatus('Could not determine user ID.');
+      showToast('Could not determine user ID', 'error');
       return;
     }
     // Generate .torrent file using create-torrent
@@ -1083,11 +1524,10 @@ export default function SharePage() {
     const totalSize = files.reduce((sum, f) => sum + f.size, 0);
     console.log(`Total size: ${totalSize} bytes (${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
     
-    // Warn user if files are suspiciously small
+    // Warn user if files are suspiciously small (but don't show toast - just log)
     if (totalSize < 1024 && files.length > 0) {
       console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). This might indicate empty files or a selection issue.');
-      setStatus(`Warning: Files appear very small (${totalSize} bytes total). Please verify you selected the correct files.`);
-      // Still proceed with creation, but warn the user
+      // Still proceed with creation
     }
     
     createTorrent(filesToTorrent, { 
@@ -1096,6 +1536,7 @@ export default function SharePage() {
     }, async (err: any, torrentBuf: Buffer) => {
       if (err || !torrentBuf) {
         setStatus('Failed to create .torrent file');
+        showToast('Failed to create .torrent file', 'error');
         setTorrentFileUrl(null);
         return;
       }
@@ -1171,11 +1612,13 @@ export default function SharePage() {
             difference: `${Math.abs(originalTotalSize - parsedTotalSize)} bytes`
           });
           setStatus(`Warning: File size mismatch detected. Original: ${(originalTotalSize / 1024).toFixed(2)} KB, Torrent: ${(parsedTotalSize / 1024).toFixed(2)} KB`);
+          showToast('File size mismatch detected', 'warning');
         }
         console.log('Full parsed torrent object:', parsed);
       } catch (parseErr) {
         console.error('Error parsing torrent:', parseErr);
         setStatus('Failed to parse torrent file');
+        showToast('Failed to parse torrent file', 'error');
         return;
       }
       
@@ -1192,6 +1635,7 @@ export default function SharePage() {
       } else {
         console.error('Parsed torrent missing infoHash:', parsed);
         setStatus('Failed to parse torrent infoHash');
+        showToast('Failed to parse torrent infoHash', 'error');
         return;
       }
       const torrentFileName = (parsed.name || torrentName);
@@ -1200,6 +1644,91 @@ export default function SharePage() {
       
       setMagnet(magnetURI);
       const fileCountText = files.length === 1 ? 'file' : `${files.length} files`;
+      
+      // Register file on blockchain if wallet is connected
+      if (wallet.isConnected && wallet.address) {
+        try {
+          setIsRegistering(true);
+          setStatus('Registering file on blockchain...');
+          const fileNameToRegister = name && name.trim() ? name : (files.length === 1 
+            ? (files[0].name ? files[0].name.replace(/\.[^/.]+$/, '') : 'file')
+            : torrentName);
+          
+          // Use infoHash as contentHash
+          const contentHash = infoHash;
+          
+          const registrationResult = await registerFileOnChain(
+            fileNameToRegister,
+            magnetURI,
+            contentHash
+          );
+          
+          console.log('✅ File registered on blockchain:', registrationResult);
+          setStatus(`File registered on-chain! TX: ${registrationResult.txHash.substring(0, 10)}...`);
+          showToast('File successfully registered on blockchain', 'success');
+        } catch (error: any) {
+          // Handle contract not configured error gracefully
+          if (error.message?.includes('contract address not configured') || 
+              error.message?.includes('NEXT_PUBLIC_REGISTRY_ADDRESS')) {
+            console.info('Blockchain contracts not configured - torrent created successfully without on-chain registration');
+            showToast('Torrent created! Blockchain registration skipped (contracts not configured). See BLOCKCHAIN_SETUP.md to enable.', 'info');
+            setStatus('Torrent created (blockchain registration skipped - contracts not configured)');
+          } else if (error.message?.includes('Wrong network') || error.message?.includes('switch to Sepolia')) {
+            console.warn('Wrong network detected - user needs to switch to Sepolia');
+            setStatus('Please switch to Sepolia testnet in MetaMask to register on blockchain');
+            showToast('Wrong network! Please switch to Sepolia testnet (Chain ID: 11155111) in MetaMask to register files on blockchain.', 'warning');
+            // Try to switch network automatically
+            try {
+              if (typeof window !== 'undefined' && (window as any).ethereum) {
+                await (window as any).ethereum.request({
+                  method: 'wallet_switchEthereumChain',
+                  params: [{ chainId: '0xaa36a7' }], // Sepolia chain ID in hex
+                });
+                showToast('Switched to Sepolia! Please try registering again.', 'success');
+              }
+            } catch (switchError: any) {
+              // If Sepolia network is not added, try to add it
+              if (switchError.code === 4902) {
+                try {
+                  await (window as any).ethereum.request({
+                    method: 'wallet_addEthereumChain',
+                    params: [{
+                      chainId: '0xaa36a7',
+                      chainName: 'Sepolia',
+                      nativeCurrency: {
+                        name: 'ETH',
+                        symbol: 'ETH',
+                        decimals: 18
+                      },
+                      rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+                      blockExplorerUrls: ['https://sepolia.etherscan.io']
+                    }]
+                  });
+                  showToast('Sepolia network added! Please try registering again.', 'success');
+                } catch (addError) {
+                  console.error('Failed to add Sepolia network:', addError);
+                }
+              } else if (switchError.code === 4001) {
+                showToast('Network switch cancelled. Please switch to Sepolia manually in MetaMask.', 'warning');
+              }
+            }
+          } else if (error.message?.includes('already registered')) {
+            setStatus('File already registered on-chain');
+            showToast('File already registered on blockchain', 'info');
+          } else if (error.message?.includes('user rejected') || error.code === 4001) {
+            setStatus('Blockchain registration cancelled');
+            showToast('Blockchain registration cancelled', 'warning');
+          } else {
+            console.error('Failed to register file on blockchain:', error);
+            setStatus('Failed to register on blockchain (torrent still created)');
+            showToast('Failed to register on blockchain (torrent still works)', 'warning');
+          }
+        } finally {
+          setIsRegistering(false);
+        }
+      } else {
+        console.log('Wallet not connected - skipping blockchain registration');
+      }
       
       // Save to MongoDB via API
       try {
@@ -1217,9 +1746,11 @@ export default function SharePage() {
         });
         if (!res.ok) {
           setStatus('Torrent created, but failed to save to database.');
+          showToast('Torrent created, but failed to save to database', 'warning');
         }
       } catch (e) {
         setStatus('Torrent created, but error saving to database.');
+        showToast('Torrent created, but error saving to database', 'warning');
       }
       
         // Automatically start seeding the files
@@ -1474,6 +2005,7 @@ export default function SharePage() {
           }
           
           setStatus(`Torrent created and seeding started for ${fileCountText}! Download the .torrent file or copy the magnet link.`);
+          showToast(`Torrent created and seeding started for ${fileCountText}!`, 'success');
           
           // Listen for 'ready' event to ensure files are available
           torrent.on('ready', () => {
@@ -1519,23 +2051,14 @@ export default function SharePage() {
           torrent.on('error', (err: any) => {
             console.error("Torrent error:", err.message);
             setSeedingStatus(`Error seeding: ${err.message}`);
+            showToast(`Error seeding: ${err.message}`, 'error');
           });
           
-          // Update peer stats function
+          // Update peer stats function - now handled by global useEffect hook
           const updatePeerStats = () => {
-            const client = (window as any).__webtorrentClient;
-            if (client) {
-              const torrents = client.torrents || [];
-              const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
-              torrents.forEach((t: any) => {
-                newPeerStats[t.infoHash] = {
-                  peers: t.numPeers || 0,
-                  downloadSpeed: t.downloadSpeed || 0,
-                  uploadSpeed: t.uploadSpeed || 0
-                };
-              });
-              setPeerStats(newPeerStats);
-            }
+            // Trigger the global update by updating seedingTorrents length dependency
+            // The global useEffect will handle the actual update
+            setSeedingTorrents((prev) => [...prev]);
           };
           
           // Helper to check if peer has pieces
@@ -1560,25 +2083,168 @@ export default function SharePage() {
           torrent.on('wire', (wire: any) => {
             const wires = torrent.wires || [];
             const weAreUploadingToPeer = wire.uploaded && wire.uploaded > 0;
+            const peerHasPiecesValue = peerHasPieces(wire);
             
-            console.log('🔌 Peer connected to auto-seeded torrent!', {
+            console.log('🔌 [SEEDER] Peer connected to auto-seeded torrent!', {
               fileName: files.length === 1 ? files[0].name : `${files.length} files`,
+              torrentHash: torrentInfoHash.substring(0, 8),
               peerId: wire.peerId?.toString?.('hex')?.substring(0, 16) || 'Unknown',
               totalPeers: wires.length,
-              peerHasPieces: peerHasPieces(wire),
-              peerType: peerHasPieces(wire) ? '🟢 Seeder' : '🔴 Downloader',
+              numPeers: torrent.numPeers || 0,
+              peerHasPieces: peerHasPiecesValue,
+              peerType: peerHasPiecesValue ? '🟢 Seeder' : '🔴 Downloader',
               weAreSeeder: torrent.done ? '✅ Yes' : '✅ Yes (direct file - always ready)',
               uploadedToPeer: wire.uploaded || 0,
-              weAreUploading: weAreUploadingToPeer ? '✅ Yes' : '❌ No'
+              weAreUploading: weAreUploadingToPeer ? '✅ Yes' : '❌ No',
+              amChoking: wire.amChoking,
+              peerChoking: wire.peerChoking,
+              amInterested: wire.amInterested,
+              peerInterested: wire.peerInterested,
+              connectionDirection: 'Bidirectional (should be visible to downloader)',
+              wireDetails: {
+                remoteAddress: wire.remoteAddress || 'Unknown',
+                remotePort: wire.remotePort || 'Unknown'
+              }
             });
             
+            // Force immediate UI update
             updatePeerStats();
+            // Also trigger the global update to ensure consistency
+            const client = (window as any).__webtorrentClient;
+            if (client) {
+              const updateAllPeerStats = () => {
+                const torrents = client.torrents || [];
+                const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                
+                const peerHasPieces = (w: any) => {
+                  if (!w || !w.peerPieces) return false;
+                  if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                  if (typeof w.peerPieces === 'object') {
+                    if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                    if (Object.keys(w.peerPieces).length > 0) return true;
+                    try {
+                      if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                      if (typeof w.peerPieces.toString === 'function') {
+                        return w.peerPieces.toString().includes('1');
+                      }
+                    } catch (e) {}
+                  }
+                  if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                  return false;
+                };
+                
+                torrents.forEach((t: any) => {
+                  if (t && !t.destroyed) {
+                    const tHash = t.infoHash?.toString?.('hex') || 
+                                  (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                                  (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+                    
+                    if (!tHash) return;
+                    
+                    const wires = t.wires || [];
+                    const seeders = wires.filter(peerHasPieces).length;
+                    const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                    const peers = t.numPeers || wires.length || 0;
+                    
+                    newPeerStats[tHash] = {
+                      peers,
+                      downloadSpeed: t.downloadSpeed || 0,
+                      uploadSpeed: t.uploadSpeed || 0,
+                      seeders,
+                      downloaders
+                    };
+                  }
+                });
+                
+                setPeerStats(newPeerStats);
+                setStatsUpdateCounter(prev => prev + 1);
+              };
+              updateAllPeerStats();
+            }
           });
           
           torrent.on('noPeers', () => {
             console.log('⚠️ No peers event (auto-seeded)');
             updatePeerStats();
           });
+          
+          // Aggressive wire monitoring - check wires array directly every 500ms
+          const wireMonitor = setInterval(() => {
+            const wires = torrent.wires || [];
+            const currentWiresCount = wires.length;
+            
+            // Log if wires count changes (peer connected/disconnected)
+            if (currentWiresCount !== ((torrent as any).__lastWiresCount || 0)) {
+              console.log(`🔍 Wire count changed for ${torrentInfoHash.substring(0, 8)}: ${(torrent as any).__lastWiresCount || 0} → ${currentWiresCount}`, {
+                wires: wires.map((w: any) => ({
+                  peerId: w.peerId?.toString?.('hex')?.substring(0, 8) || 'unknown',
+                  hasPieces: peerHasPieces(w),
+                  uploaded: w.uploaded || 0,
+                  downloaded: w.downloaded || 0,
+                  amChoking: w.amChoking,
+                  peerChoking: w.peerChoking
+                }))
+              });
+              (torrent as any).__lastWiresCount = currentWiresCount;
+              
+              // Force immediate UI update when wire count changes
+              updatePeerStats();
+              const client = (window as any).__webtorrentClient;
+              if (client) {
+                const updateAllPeerStats = () => {
+                  const torrents = client.torrents || [];
+                  const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number; seeders: number; downloaders: number }> = {};
+                  
+                  const peerHasPieces = (w: any) => {
+                    if (!w || !w.peerPieces) return false;
+                    if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
+                    if (typeof w.peerPieces === 'object') {
+                      if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
+                      if (Object.keys(w.peerPieces).length > 0) return true;
+                      try {
+                        if (typeof w.peerPieces.count === 'function') return w.peerPieces.count() > 0;
+                        if (typeof w.peerPieces.toString === 'function') {
+                          return w.peerPieces.toString().includes('1');
+                        }
+                      } catch (e) {}
+                    }
+                    if (typeof w.peerPieces === 'number') return w.peerPieces > 0;
+                    return false;
+                  };
+                  
+                  torrents.forEach((t: any) => {
+                    if (t && !t.destroyed) {
+                      const tHash = t.infoHash?.toString?.('hex') || 
+                                    (typeof t.infoHash === 'string' ? t.infoHash : '') ||
+                                    (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
+                      
+                      if (!tHash) return;
+                      
+                      const wires = t.wires || [];
+                      const seeders = wires.filter(peerHasPieces).length;
+                      const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                      const peers = t.numPeers || wires.length || 0;
+                      
+                      newPeerStats[tHash] = {
+                        peers,
+                        downloadSpeed: t.downloadSpeed || 0,
+                        uploadSpeed: t.uploadSpeed || 0,
+                        seeders,
+                        downloaders
+                      };
+                    }
+                  });
+                  
+                  setPeerStats(newPeerStats);
+                  setStatsUpdateCounter(prev => prev + 1);
+                };
+                updateAllPeerStats();
+              }
+            }
+          }, 500); // Check every 500ms
+          
+          // Store interval for cleanup
+          (torrent as any).__wireMonitorInterval = wireMonitor;
           
           // Periodic summary
           const interval = setInterval(() => {
@@ -1648,10 +2314,12 @@ export default function SharePage() {
         }).on('error', (err: any) => {
           console.error('Failed to start auto-seeding:', err);
           setStatus(`Torrent created for ${fileCountText}, but failed to start seeding: ${err.message}. You can manually seed below.`);
+          showToast(`Torrent created but failed to start seeding: ${err.message}`, 'warning');
         });
       } catch (seedErr) {
         console.error('Error starting auto-seeding:', seedErr);
         setStatus(`Torrent created for ${fileCountText}, but failed to start seeding. You can manually seed below.`);
+        showToast('Torrent created but failed to start seeding', 'warning');
       }
     });
   };
@@ -1664,6 +2332,7 @@ export default function SharePage() {
       const client = await getWebTorrentClient();
       if (seedingFiles.length === 0) {
         setSeedingStatus("No .torrent file provided");
+        showToast('No .torrent file provided', 'warning');
         return;
       }
       
@@ -1678,8 +2347,32 @@ export default function SharePage() {
         // @ts-ignore
         const parseTorrentModule = await import('parse-torrent');
         const parseTorrent = parseTorrentModule.default || parseTorrentModule;
+        let parsed: any;
         try {
-          const parsed = parseTorrent(source);
+          parsed = parseTorrent(source);
+          // Handle async parseTorrent if it returns a Promise
+          if (parsed && typeof parsed.then === 'function') {
+            parsed = await parsed;
+          }
+          
+          // Validate .torrent before seeding
+          if (!parsed || typeof parsed !== 'object') {
+            throw new Error('Invalid .torrent structure - file is not a valid torrent format');
+          }
+          if (!parsed.info || typeof parsed.info !== 'object') {
+            throw new Error('Missing info dictionary - the .torrent file is missing required metadata');
+          }
+          const hasFilesArray = Array.isArray(parsed.files) && parsed.files.length > 0;
+          const hasSingleLength = typeof parsed.length === 'number' && parsed.length >= 0;
+          if (!hasFilesArray && !hasSingleLength) {
+            throw new Error('No files found in .torrent - the torrent contains no files to share');
+          }
+          if (parsed.announce && !Array.isArray(parsed.announce)) {
+            throw new Error('Invalid announce list - tracker configuration is malformed');
+          }
+          if (!parsed.infoHash) {
+            throw new Error('Missing infoHash - cannot identify this torrent');
+          }
           const infoHash = parsed.infoHash.toString('hex');
           const existing = client.get(infoHash);
           // Only skip if torrent exists AND is not destroyed AND is active
@@ -1717,8 +2410,13 @@ export default function SharePage() {
               }
             }
           }
-        } catch (e) {
-          console.warn('Could not parse torrent file:', e);
+        } catch (e: any) {
+          console.error('Could not parse or validate torrent file:', e);
+          const errorMsg = e?.message || 'Invalid or corrupted .torrent file';
+          setSeedingStatus(`❌ Error with "${file.name}": ${errorMsg}. Please use a valid .torrent file.`);
+          showToast(`Error with "${file.name}": ${errorMsg}`, 'error');
+          // Show error prominently and stop processing this file
+          continue;
         }
         
         // Store source in a const that will be accessible in the callback
@@ -1731,31 +2429,30 @@ export default function SharePage() {
           setSeedingTorrents((prev) => [...prev, torrent]);
           started++;
           setSeedingStatus(`Seeding ${started}/${seedingFiles.length} torrent(s)...`);
-          torrent.on('error', (err: any) => console.error("Torrent error:", err.message));
-          
-          const updatePeerStats = () => {
-            const client = (window as any).__webtorrentClient;
-            if (client) {
-              const torrents = client.torrents || [];
-              const newPeerStats: Record<string, { peers: number; downloadSpeed: number; uploadSpeed: number }> = {};
-              torrents.forEach((t: any) => {
-                newPeerStats[t.infoHash] = {
-                  peers: t.numPeers || 0,
-                  downloadSpeed: t.downloadSpeed || 0,
-                  uploadSpeed: t.uploadSpeed || 0
-                };
-              });
-              setPeerStats(newPeerStats);
+          torrent.on('error', (err: any) => {
+            const errorMsg = err.message || 'Unknown error';
+            console.error("Torrent error:", errorMsg);
+            // Show error to user
+            if (errorMsg.includes('invalid') || errorMsg.includes('corrupt') || errorMsg.includes('parse') || errorMsg.includes('malformed')) {
+              setSeedingStatus(`❌ Error seeding "${file.name}": ${errorMsg}. The .torrent file may be invalid or corrupted.`);
+              showToast(`Error seeding "${file.name}": ${errorMsg}`, 'error');
+            } else {
+              setSeedingStatus(`❌ Error seeding "${file.name}": ${errorMsg}`);
+              showToast(`Error seeding "${file.name}": ${errorMsg}`, 'error');
             }
-          };
+          });
+          torrent.on('warning', (warn: any) => {
+            const warnMsg = warn.message || 'Unknown warning';
+            console.warn("Torrent warning:", warnMsg);
+            // Show warning for important issues
+            if (warnMsg.includes('invalid') || warnMsg.includes('corrupt') || warnMsg.includes('parse') || warnMsg.includes('malformed')) {
+              setSeedingStatus(`⚠️ Warning for "${file.name}": ${warnMsg}. The .torrent file may have issues.`);
+              showToast(`Warning for "${file.name}": ${warnMsg}`, 'warning');
+            }
+          });
           
-          torrent.on('wire', () => updatePeerStats());
-          torrent.on('noPeers', () => updatePeerStats());
-          
-          const interval = setInterval(() => updatePeerStats(), 5000);
-          torrent.on('destroy', () => clearInterval(interval));
-          
-          updatePeerStats();
+          // Peer stats are now handled by global useEffect hook
+          // Individual torrent events will trigger updates via the global listener
           
           // Save .torrent file to localStorage for restoration
           try {
@@ -1823,8 +2520,10 @@ export default function SharePage() {
       
       if (started > 0) {
         setSeedingStatus(`Successfully started seeding ${started} torrent(s)${skipped > 0 ? `. Skipped ${skipped} duplicate(s).` : ''}`);
+        showToast(`Successfully started seeding ${started} torrent(s)${skipped > 0 ? `. Skipped ${skipped} duplicate(s).` : ''}`, 'success');
       } else if (skipped > 0) {
-        setSeedingStatus(`All torrents are duplicates. ${skipped} torrent(s) already seeding.`);
+        setSeedingStatus(`This torrent is a duplicate. ${skipped} torrent(s) already seeding.`);
+        showToast(`This torrent is a duplicate. ${skipped} torrent(s) already seeding.`, 'info');
       }
       
       // Clear duplicate messages after 10 seconds
@@ -1833,17 +2532,35 @@ export default function SharePage() {
       }
     } catch (err) {
       setSeedingStatus("Failed to seed");
+      showToast('Failed to seed', 'error');
       console.error(err);
     }
   }
+
+  // Force re-render when statsUpdateCounter changes
+  // This ensures the UI updates when peer stats change
+  useEffect(() => {
+    // This effect runs whenever statsUpdateCounter changes, forcing a re-render
+    // The actual re-render is triggered by the state change itself
+  }, [statsUpdateCounter]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black">
       <div className="mx-auto max-w-3xl px-4 py-10">
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 backdrop-blur">
           <div className="mb-4">
-            <div className="text-white text-xl font-semibold">Share a file</div>
-            <div className="text-sm text-zinc-400">Create a torrent and register on-chain</div>
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-white text-xl font-semibold">Share a file</div>
+                <div className="text-sm text-zinc-400">Create a torrent and register on-chain</div>
+              </div>
+              <WalletConnect />
+            </div>
+            {!wallet.isConnected && (
+              <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                Connect your wallet to register files on the blockchain and earn points
+              </div>
+            )}
           </div>
 
           <div className="space-y-4">
@@ -1857,145 +2574,179 @@ export default function SharePage() {
               />
             </div>
 
-            <div
-              tabIndex={0}
-              role="button"
-              aria-label="File upload area"
-              onClick={() => fileInputRef.current?.click()}
-              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
-              onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-              onDragLeave={() => setIsDragging(false)}
-              onDrop={e => {
-                e.preventDefault();
-                setIsDragging(false);
-                const droppedFiles = Array.from(e.dataTransfer.files || []);
-                if (droppedFiles.length > 0) {
-                  console.log('=== FILES DROPPED ===');
-                  console.log('File count:', droppedFiles.length);
-                  
-                  // Log each file individually for better visibility
-                  droppedFiles.forEach((f, i) => {
-                    console.log(`File ${i + 1}:`, {
-                      name: f.name,
-                      size: `${f.size} bytes`,
-                      sizeKB: `${(f.size / 1024).toFixed(2)} KB`,
-                      sizeMB: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
-                      type: f.type || 'Unknown',
-                      lastModified: new Date(f.lastModified).toISOString(),
-                      webkitRelativePath: f.webkitRelativePath || 'N/A'
+            {files.length === 0 ? (
+              <div
+                tabIndex={0}
+                role="button"
+                aria-label="File upload area"
+                onClick={() => fileInputRef.current?.click()}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
+                onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={e => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  const droppedFiles = Array.from(e.dataTransfer.files || []);
+                  if (droppedFiles.length > 0) {
+                    console.log('=== FILES DROPPED ===');
+                    console.log('File count:', droppedFiles.length);
+                    
+                    // Log each file individually for better visibility
+                    droppedFiles.forEach((f, i) => {
+                      console.log(`File ${i + 1}:`, {
+                        name: f.name,
+                        size: `${f.size} bytes`,
+                        sizeKB: `${(f.size / 1024).toFixed(2)} KB`,
+                        sizeMB: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
+                        type: f.type || 'Unknown',
+                        lastModified: new Date(f.lastModified).toISOString(),
+                        webkitRelativePath: f.webkitRelativePath || 'N/A'
+                      });
                     });
-                  });
-                  
-                  const totalSize = droppedFiles.reduce((sum, f) => sum + f.size, 0);
-                  console.log('=== SUMMARY ===');
-                  console.log('Total size:', totalSize, 'bytes', `(${(totalSize / 1024).toFixed(2)} KB / ${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
-                  console.log('Average file size:', `${(totalSize / droppedFiles.length).toFixed(2)} bytes`);
-                  
-                  if (totalSize < 1024 && droppedFiles.length > 0) {
-                    console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). Files might be empty or not dropped correctly.');
-                    console.warn('This usually means:');
-                    console.warn('  1. The files are actually empty');
-                    console.warn('  2. Folder selection did not work correctly');
-                    console.warn('  3. The browser did not load file contents');
-                  }
-                  
-                  const dt = new DataTransfer();
-                  droppedFiles.forEach(f => dt.items.add(f));
-                  if (fileInputRef.current) {
-                    fileInputRef.current.files = dt.files;
-                    handleFileChange({ target: { files: dt.files } } as any);
-                  }
-                  setFiles(droppedFiles);
-                  // If single image file, set preview
-                  if (droppedFiles.length === 1 && droppedFiles[0].type.startsWith('image/')) {
-                    const url = URL.createObjectURL(droppedFiles[0]);
-                    setDropPreview(url);
-                  } else {
-                    setDropPreview(null);
-                  }
-                }
-              }}
-              className={`relative rounded-xl border border-dashed ${isDragging ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-zinc-700 bg-zinc-950/60'} p-8 text-center cursor-pointer hover:bg-zinc-900/60 w-full`}
-              style={{ outline: 'none', minHeight: '220px' }}
-            >
-              {/* Icon/text overlay statically placed at the top inside the upload area */}
-              {!dropPreview && (
-                <div className="flex flex-col items-center gap-3 pb-4">
-                  <div className="h-12 w-12 grid place-items-center rounded-full bg-zinc-800/60 text-zinc-300 mx-auto">
-                    <ImagePlus size={22} />
-                  </div>
-                  <div className="text-zinc-200 font-medium">Click to select</div>
-                  <div className="text-xs text-zinc-500">or drag and drop files or folders here</div>
-                </div>
-              )}
-              {/* File preview (if present) */}
-              {dropPreview && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={dropPreview} alt="preview" className="max-h-72 rounded-lg object-contain mx-auto" style={{ pointerEvents: 'none', position: 'relative', zIndex: 2 }} />
-              )}
-              {/* Hidden file input - supports multiple files and directories */}
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                tabIndex={-1}
-                multiple
-                // @ts-ignore - webkitdirectory is a valid HTML attribute but not in TypeScript types
-                webkitdirectory=""
-                onChange={e => {
-                  handleFileChange(e);
-                  const selectedFiles = Array.from(e.target.files || []);
-                  console.log('=== FILES SELECTED ===');
-                  console.log('File count:', selectedFiles.length);
-                  
-                  // Log each file individually for better visibility
-                  selectedFiles.forEach((f, i) => {
-                    console.log(`File ${i + 1}:`, {
-                      name: f.name,
-                      size: `${f.size} bytes`,
-                      sizeKB: `${(f.size / 1024).toFixed(2)} KB`,
-                      sizeMB: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
-                      type: f.type || 'Unknown',
-                      lastModified: new Date(f.lastModified).toISOString(),
-                      webkitRelativePath: f.webkitRelativePath || 'N/A'
-                    });
-                  });
-                  
-                  const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
-                  console.log('=== SUMMARY ===');
-                  console.log('Total size:', totalSize, 'bytes', `(${(totalSize / 1024).toFixed(2)} KB / ${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
-                  console.log('Average file size:', `${(totalSize / selectedFiles.length).toFixed(2)} bytes`);
-                  
-                  if (totalSize < 1024 && selectedFiles.length > 0) {
-                    console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). Files might be empty or not selected correctly.');
-                    console.warn('This usually means:');
-                    console.warn('  1. The files are actually empty');
-                    console.warn('  2. Folder selection did not work correctly');
-                    console.warn('  3. The browser did not load file contents');
-                  }
-                  
-                  setFiles(selectedFiles);
-                  // If single image file, set preview
-                  if (selectedFiles.length === 1 && selectedFiles[0].type.startsWith('image/')) {
-                    const url = URL.createObjectURL(selectedFiles[0]);
-                    setDropPreview(url);
-                  } else {
-                    setDropPreview(null);
+                    
+                    const totalSize = droppedFiles.reduce((sum, f) => sum + f.size, 0);
+                    console.log('=== SUMMARY ===');
+                    console.log('Total size:', totalSize, 'bytes', `(${(totalSize / 1024).toFixed(2)} KB / ${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
+                    console.log('Average file size:', `${(totalSize / droppedFiles.length).toFixed(2)} bytes`);
+                    
+                    if (totalSize < 1024 && droppedFiles.length > 0) {
+                      console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). Files might be empty or not dropped correctly.');
+                      console.warn('This usually means:');
+                      console.warn('  1. The files are actually empty');
+                      console.warn('  2. Folder selection did not work correctly');
+                      console.warn('  3. The browser did not load file contents');
+                    }
+                    
+                    const dt = new DataTransfer();
+                    droppedFiles.forEach(f => dt.items.add(f));
+                    if (fileInputRef.current) {
+                      fileInputRef.current.files = dt.files;
+                      handleFileChange({ target: { files: dt.files } } as any);
+                    }
+                    setFiles(droppedFiles);
+                    // If single image file, set preview
+                    if (droppedFiles.length === 1 && droppedFiles[0].type.startsWith('image/')) {
+                      const url = URL.createObjectURL(droppedFiles[0]);
+                      setDropPreview(url);
+                    } else {
+                      setDropPreview(null);
+                    }
                   }
                 }}
-              />
-              {/* File name and Remove button row */}
-              <div className="flex items-center justify-between text-xs text-zinc-400 mt-4" style={{ position: 'relative', zIndex: 3 }}>
-                <div className="flex-1 truncate">
-                  {files.length === 0 ? (
-                    'No files selected'
-                  ) : files.length === 1 ? (
-                    name || fileName || files[0].name
-                  ) : (
-                    `${files.length} file${files.length > 1 ? 's' : ''} selected${name ? ` - ${name}` : ''}`
-                  )}
-                </div>
-                {files.length > 0 && (
+                className={`relative rounded-xl border border-dashed ${isDragging ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-zinc-700 bg-zinc-950/60'} p-8 text-center cursor-pointer hover:bg-zinc-900/60 w-full`}
+                style={{ outline: 'none', minHeight: '220px' }}
+              >
+                {/* Icon/text overlay statically placed at the top inside the upload area */}
+                {!dropPreview && (
+                  <div className="flex flex-col items-center gap-3 pb-4">
+                    <div className="h-12 w-12 grid place-items-center rounded-full bg-zinc-800/60 text-zinc-300 mx-auto">
+                      <ImagePlus size={22} />
+                    </div>
+                    <div className="text-zinc-200 font-medium">Click to select</div>
+                    <div className="text-xs text-zinc-500">or drag and drop files or folders here</div>
+                  </div>
+                )}
+                {/* File preview (if present) */}
+                {dropPreview && (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={dropPreview} alt="preview" className="max-h-72 rounded-lg object-contain mx-auto" style={{ pointerEvents: 'none', position: 'relative', zIndex: 2 }} />
+                )}
+                {/* Hidden file input - supports multiple files and directories */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  tabIndex={-1}
+                  multiple
+                  // @ts-ignore - webkitdirectory is a valid HTML attribute but not in TypeScript types
+                  webkitdirectory=""
+                  onChange={e => {
+                    handleFileChange(e);
+                    const selectedFiles = Array.from(e.target.files || []);
+                    console.log('=== FILES SELECTED ===');
+                    console.log('File count:', selectedFiles.length);
+                    
+                    // Log each file individually for better visibility
+                    selectedFiles.forEach((f, i) => {
+                      console.log(`File ${i + 1}:`, {
+                        name: f.name,
+                        size: `${f.size} bytes`,
+                        sizeKB: `${(f.size / 1024).toFixed(2)} KB`,
+                        sizeMB: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
+                        type: f.type || 'Unknown',
+                        lastModified: new Date(f.lastModified).toISOString(),
+                        webkitRelativePath: f.webkitRelativePath || 'N/A'
+                      });
+                    });
+                    
+                    const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+                    console.log('=== SUMMARY ===');
+                    console.log('Total size:', totalSize, 'bytes', `(${(totalSize / 1024).toFixed(2)} KB / ${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
+                    console.log('Average file size:', `${(totalSize / selectedFiles.length).toFixed(2)} bytes`);
+                    
+                    if (totalSize < 1024 && selectedFiles.length > 0) {
+                      console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). Files might be empty or not selected correctly.');
+                      console.warn('This usually means:');
+                      console.warn('  1. The files are actually empty');
+                      console.warn('  2. Folder selection did not work correctly');
+                      console.warn('  3. The browser did not load file contents');
+                    }
+                    
+                    setFiles(selectedFiles);
+                    // If single image file, set preview
+                    if (selectedFiles.length === 1 && selectedFiles[0].type.startsWith('image/')) {
+                      const url = URL.createObjectURL(selectedFiles[0]);
+                      setDropPreview(url);
+                    } else {
+                      setDropPreview(null);
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="relative rounded-xl border border-zinc-700 bg-zinc-950/60 p-8">
+                <div className="flex flex-col items-center gap-6">
+                  {/* Folder Component */}
+                  <Folder
+                    color="#06b6d4"
+                    size={1.2}
+                    items={files.slice(0, 3).map((file, index) => (
+                      <div key={index} className="flex flex-col items-center justify-center h-full p-2">
+                        <FileText className="text-zinc-700 mb-1" size={24} />
+                        <span className="text-[10px] text-zinc-600 text-center px-1 truncate w-full">
+                          {file.name.length > 15 ? `${file.name.substring(0, 12)}...` : file.name}
+                        </span>
+                      </div>
+                    ))}
+                    className="mx-auto"
+                  />
+                  
+                  {/* File info */}
+                  <div className="text-center space-y-2 w-full">
+                    <div className="text-zinc-200 font-medium">
+                      {files.length === 1 ? (
+                        name || files[0].name
+                      ) : (
+                        `${files.length} file${files.length > 1 ? 's' : ''} selected${name ? ` - ${name}` : ''}`
+                      )}
+                    </div>
+                    {files.length > 1 && (
+                      <div className="text-xs text-zinc-400 max-h-32 overflow-y-auto space-y-1">
+                        {files.slice(0, 5).map((f, i) => (
+                          <div key={i} className="text-xs text-zinc-500 truncate">
+                            • {f.webkitRelativePath || f.name} ({formatBytes(f.size)})
+                          </div>
+                        ))}
+                        {files.length > 5 && (
+                          <div className="text-xs text-zinc-500">
+                            ... and {files.length - 5} more file{files.length - 5 > 1 ? 's' : ''}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Remove button */}
                   <button
                     onClick={() => { 
                       handleRemove(); 
@@ -2008,45 +2759,92 @@ export default function SharePage() {
                         fileInputRef.current.value = '';
                       }
                     }}
-                    className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800 ml-2"
+                    className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
                   >
-                    Remove
+                    Remove Files
                   </button>
-                )}
-              </div>
-              {/* Show file list if multiple files */}
-              {files.length > 1 && (
-                <div className="mt-2 max-h-32 overflow-y-auto space-y-1">
-                  {files.slice(0, 10).map((f, i) => (
-                    <div key={i} className="text-xs text-zinc-500 truncate">
-                      • {f.webkitRelativePath || f.name} ({(f.size / 1024).toFixed(1)} KB)
-                    </div>
-                  ))}
-                  {files.length > 10 && (
-                    <div className="text-xs text-zinc-500">
-                      ... and {files.length - 10} more file{files.length - 10 > 1 ? 's' : ''}
-                    </div>
-                  )}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+            
+            {/* Hidden file input - always present for file selection */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              tabIndex={-1}
+              multiple
+              // @ts-ignore - webkitdirectory is a valid HTML attribute but not in TypeScript types
+              webkitdirectory=""
+              onChange={e => {
+                handleFileChange(e);
+                const selectedFiles = Array.from(e.target.files || []);
+                console.log('=== FILES SELECTED ===');
+                console.log('File count:', selectedFiles.length);
+                
+                // Log each file individually for better visibility
+                selectedFiles.forEach((f, i) => {
+                  console.log(`File ${i + 1}:`, {
+                    name: f.name,
+                    size: `${f.size} bytes`,
+                    sizeKB: `${(f.size / 1024).toFixed(2)} KB`,
+                    sizeMB: `${(f.size / 1024 / 1024).toFixed(2)} MB`,
+                    type: f.type || 'Unknown',
+                    lastModified: new Date(f.lastModified).toISOString(),
+                    webkitRelativePath: f.webkitRelativePath || 'N/A'
+                  });
+                });
+                
+                const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+                console.log('=== SUMMARY ===');
+                console.log('Total size:', totalSize, 'bytes', `(${(totalSize / 1024).toFixed(2)} KB / ${(totalSize / 1024 / 1024).toFixed(2)} MB)`);
+                console.log('Average file size:', `${(totalSize / selectedFiles.length).toFixed(2)} bytes`);
+                
+                if (totalSize < 1024 && selectedFiles.length > 0) {
+                  console.warn('⚠️ WARNING: Total file size is very small (< 1 KB). Files might be empty or not selected correctly.');
+                  console.warn('This usually means:');
+                  console.warn('  1. The files are actually empty');
+                  console.warn('  2. Folder selection did not work correctly');
+                  console.warn('  3. The browser did not load file contents');
+                }
+                
+                setFiles(selectedFiles);
+                // If single image file, set preview
+                if (selectedFiles.length === 1 && selectedFiles[0].type.startsWith('image/')) {
+                  const url = URL.createObjectURL(selectedFiles[0]);
+                  setDropPreview(url);
+                } else {
+                  setDropPreview(null);
+                }
+              }}
+            />
 
             <div className="pt-2">
               <button
                 className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
                 onClick={handleCreate}
-                disabled={files.length === 0}
+                disabled={files.length === 0 || isRegistering}
               >
-                {files.length === 0 
-                  ? 'Select files or folder to continue' 
-                  : files.length === 1 
-                    ? 'Create & Register' 
-                    : `Create & Register (${files.length} files)`
-                }
+                {isRegistering ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Registering on blockchain...
+                  </>
+                ) : files.length === 0 ? (
+                  'Select files or folder to continue'
+                ) : files.length === 1 ? (
+                  wallet.isConnected ? 'Create & Register' : 'Create Torrent'
+                ) : (
+                  wallet.isConnected 
+                    ? `Create & Register (${files.length} files)`
+                    : `Create Torrent (${files.length} files)`
+                )}
               </button>
             </div>
 
-            {status && <div className="text-sm text-zinc-300">{status}</div>}
+            {status && !status.includes('❌') && !status.includes('⚠️') && !status.includes('Failed') && !status.includes('Faulty') && !status.includes('Warning') && !status.includes('created') && (
+              <div className="text-sm text-zinc-300">{status}</div>
+            )}
 
             {(magnet || torrentFileUrl) && (
               <div className="space-y-2">
@@ -2161,7 +2959,18 @@ export default function SharePage() {
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
                 <div className="text-xs text-zinc-400 mb-1">Total Size</div>
                 <div className="text-2xl font-bold text-cyan-400">
-                  {(seedingTorrents.reduce((acc, t) => acc + (t.length || 0), 0) / 1024 / 1024).toFixed(2)} MB
+                  {(() => {
+                    // Calculate total size from all seeding torrents
+                    let totalBytes = 0;
+                    seedingTorrents.forEach((t) => {
+                      if (t.files && t.files.length > 0) {
+                        totalBytes += t.files.reduce((sum: number, f: any) => sum + (f.length || 0), 0);
+                      } else if (t.length && !isNaN(t.length) && t.length > 0) {
+                        totalBytes += t.length;
+                      }
+                    });
+                    return formatBytes(totalBytes);
+                  })()}
                 </div>
               </div>
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
@@ -2236,33 +3045,58 @@ export default function SharePage() {
               </button>
             )}
           </div>
-          
-          {seedingStatus && <div className="mt-3 text-sm text-cyan-300">{seedingStatus}</div>}
-          {duplicateMessage && (
-            <div className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-3">
-              <div className="text-sm font-medium text-yellow-400 mb-1">Duplicate Torrent Detected</div>
-              <div className="text-xs text-yellow-300 whitespace-pre-line">{duplicateMessage}</div>
-            </div>
-          )}
-          
+
           {/* Currently seeding list */}
-          {seedingTorrents.length > 0 && (
-            <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
-              <h3 className="text-lg font-semibold text-zinc-100 mb-4">Currently Seeding</h3>
-              <div className="space-y-2">
-                {seedingTorrents.map((t, i) => {
+          {useMemo(() => {
+            // Get fresh torrent references from client to ensure we have live data
+            // statsUpdateCounter ensures this re-runs on every update
+            const client = (window as any).__webtorrentClient;
+            const clientTorrents = client?.torrents || [];
+            
+            // Map seeding torrents to their fresh client counterparts
+            const freshTorrents = seedingTorrents.map((storedTorrent) => {
+              const storedHash = storedTorrent.infoHash?.toString?.('hex') || 
+                                (typeof storedTorrent.infoHash === 'string' ? storedTorrent.infoHash : '') ||
+                                (storedTorrent.infoHashBuffer ? Buffer.from(storedTorrent.infoHashBuffer).toString('hex') : '');
+              
+              // Find fresh torrent from client
+              const freshTorrent = clientTorrents.find((ct: any) => {
+                const ctHash = ct.infoHash?.toString?.('hex') || 
+                              (typeof ct.infoHash === 'string' ? ct.infoHash : '') ||
+                              (ct.infoHashBuffer ? Buffer.from(ct.infoHashBuffer).toString('hex') : '');
+                return ctHash && storedHash && ctHash.toLowerCase() === storedHash.toLowerCase();
+              });
+              
+              // Use fresh torrent if available, otherwise fall back to stored one
+              return freshTorrent || storedTorrent;
+            }).filter(t => t && !t.destroyed);
+            
+            if (freshTorrents.length === 0) return null;
+            
+            return (
+              <div key={`seeding-list-${statsUpdateCounter}`} className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+                {/* Force React to detect statsUpdateCounter changes */}
+                <div style={{ display: 'none' }} data-update-counter={statsUpdateCounter} />
+                <h3 className="text-lg font-semibold text-zinc-100 mb-4">Currently Seeding</h3>
+                <div className="space-y-2">
+                  {freshTorrents.map((t, i) => {
                   // Safely extract infoHash - handle both Buffer and string formats
                   const torrentInfoHash = t.infoHash?.toString?.('hex') || 
                                          (typeof t.infoHash === 'string' ? t.infoHash : '') ||
                                          (t.infoHashBuffer ? Buffer.from(t.infoHashBuffer).toString('hex') : '');
                   
-                  // Use infoHash as key for stats lookup
-                  const stats = peerStats[torrentInfoHash] || { peers: 0, downloadSpeed: 0, uploadSpeed: 0 };
-                  const uploadKBps = (stats.uploadSpeed / 1024).toFixed(1);
+                  // Get stats from peerStats state, but also calculate directly from torrent for real-time accuracy
+                  const statsFromState = peerStats[torrentInfoHash] || { peers: 0, downloadSpeed: 0, uploadSpeed: 0, seeders: 0, downloaders: 0 };
                   
-                  // Calculate seeders vs downloaders from wire connections
+                  // Always calculate directly from torrent object (most up-to-date)
+                  const wires = t.wires || [];
+                  const livePeers = t.numPeers || wires.length || 0;
+                  const liveUploadSpeed = t.uploadSpeed || 0;
+                  const liveDownloadSpeed = t.downloadSpeed || 0;
+                  
+                  // Helper to check if peer has pieces
                   const peerHasPieces = (w: any) => {
-                    if (!w.peerPieces) return false;
+                    if (!w || !w.peerPieces) return false;
                     if (Array.isArray(w.peerPieces)) return w.peerPieces.length > 0;
                     if (typeof w.peerPieces === 'object') {
                       if (w.peerPieces.length !== undefined) return w.peerPieces.length > 0;
@@ -2278,9 +3112,40 @@ export default function SharePage() {
                     return false;
                   };
                   
-                  const wires = t.wires || [];
                   const seeders = wires.filter(peerHasPieces).length;
                   const downloaders = wires.filter((w: any) => !peerHasPieces(w) || (w.uploaded && w.uploaded > 0)).length;
+                  
+                  // Use live values from torrent object (most accurate)
+                  // Prefer wires.length over numPeers as it's more accurate for active connections
+                  const actualPeers = wires.length > 0 ? wires.length : livePeers;
+                  
+                  const stats = {
+                    peers: actualPeers,
+                    downloadSpeed: liveDownloadSpeed,
+                    uploadSpeed: liveUploadSpeed,
+                    seeders,
+                    downloaders
+                  };
+                  
+                  const uploadKBps = (stats.uploadSpeed / 1024).toFixed(1);
+                  
+                  // Debug log periodically to verify updates
+                  if (statsUpdateCounter % 10 === 0) { // Log every 10th update to avoid spam
+                    console.log(`📊 Live stats for ${torrentInfoHash.substring(0, 8)} (render #${statsUpdateCounter}):`, {
+                      peers: stats.peers,
+                      seeders: stats.seeders,
+                      downloaders: stats.downloaders,
+                      wiresLength: wires.length,
+                      uploadSpeed: `${uploadKBps} KB/s`,
+                      numPeers: t.numPeers,
+                      wiresDetails: wires.map((w: any) => ({
+                        peerId: w.peerId?.toString?.('hex')?.substring(0, 8) || 'unknown',
+                        hasPieces: peerHasPieces(w),
+                        uploaded: w.uploaded || 0,
+                        downloaded: w.downloaded || 0
+                      }))
+                    });
+                  }
                   
                   // Check if this is a multi-file torrent
                   const fileCount = t.files?.length || 0;
@@ -2300,7 +3165,8 @@ export default function SharePage() {
                   }
                   
                   // Use infoHash as key if available, otherwise use index
-                  const itemKey = torrentInfoHash || `torrent-${i}`;
+                  // Include statsUpdateCounter and stats to force re-render when they change
+                  const itemKey = `${torrentInfoHash || `torrent-${i}`}-${statsUpdateCounter}-${stats.peers}-${stats.seeders}-${stats.downloaders}`;
                   
                   return (
                     <div key={itemKey} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
@@ -2329,7 +3195,7 @@ export default function SharePage() {
                             }
                             
                             if (sizeBytes > 0) {
-                              return `${(sizeBytes / 1024 / 1024).toFixed(2)} MB`;
+                              return formatBytes(sizeBytes);
                             } else {
                               // Show "Loading..." only if torrent has no files and no length
                               return 'Loading...';
@@ -2337,7 +3203,7 @@ export default function SharePage() {
                           })()}
                           {isMultiFile && ` • ${fileCount} file${fileCount > 1 ? 's' : ''}`}
                         </div>
-                        <div className="flex items-center gap-3 mt-2 text-xs flex-wrap">
+                        <div className="flex items-center gap-3 mt-2 text-xs flex-wrap" key={`stats-${torrentInfoHash}-${statsUpdateCounter}-${stats.peers}-${seeders}-${downloaders}`}>
                           <div className={`inline-flex items-center gap-1 px-2 py-1 rounded ${stats.peers > 0 ? 'bg-green-500/10 text-green-400' : 'bg-zinc-800/50 text-zinc-500'}`}>
                             <span className="w-2 h-2 rounded-full" style={{ backgroundColor: stats.peers > 0 ? '#10b981' : '#71717a' }}></span>
                             {stats.peers} {stats.peers === 1 ? 'peer' : 'peers'}
@@ -2572,7 +3438,8 @@ export default function SharePage() {
                 })}
               </div>
             </div>
-          )}
+            );
+          }, [seedingTorrents, statsUpdateCounter, peerStats])}
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { Home, Upload, Download, User2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -28,7 +29,7 @@ const ICONS: Record<IconKey, any> = {
 }
 
 export function NavBar({ items, className }: NavBarProps) {
-  const [activeTab, setActiveTab] = useState(items[0].name)
+  const pathname = usePathname();
   const [isMobile, setIsMobile] = useState(false)
 
   useEffect(() => {
@@ -46,6 +47,21 @@ export function NavBar({ items, className }: NavBarProps) {
     ...items,
     { name: "Torrents", url: "/torrents", icon: "torrents" as IconKey },
   ];
+  
+  // Determine active tab based on current pathname
+  const getActiveTabName = () => {
+    // Find the nav item whose URL matches the current pathname
+    const matchingItem = navItems.find(item => {
+      if (item.url === pathname) return true;
+      // For paths like /profile, check if pathname starts with the item URL
+      if (pathname?.startsWith(item.url) && item.url !== '/') return true;
+      return false;
+    });
+    return matchingItem?.name || items[0]?.name || '';
+  };
+  
+  const activeTab = getActiveTabName();
+
   return (
     <div
       className={cn(
@@ -61,7 +77,6 @@ export function NavBar({ items, className }: NavBarProps) {
             <Link
               key={item.name}
               href={item.url}
-              onClick={() => setActiveTab(item.name)}
               className={cn(
                 "relative cursor-pointer text-base font-bold px-6 py-2 rounded-full transition-colors border border-transparent",
                 "text-white hover:text-emerald-300",

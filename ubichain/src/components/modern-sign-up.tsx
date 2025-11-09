@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { AuthTabs } from '@/components/blocks/modern-animated-sign-in';
 import { AuthLampEffect } from '@/components/ui/auth-lamp';
 import AuthService from '@/lib/auth';
+import { useToast } from '@/components/ui/toast-1';
 
 interface SignUpFormData {
   firstName: string;
@@ -36,6 +37,7 @@ export default function ModernAnimatedSignUp() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const { showToast } = useToast();
 
   // Handle form submission
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -47,21 +49,25 @@ export default function ModernAnimatedSignUp() {
     // Basic validation
     if (!signUpData.firstName.trim() || !signUpData.lastName.trim()) {
       setError('Please enter your first and last name');
+      showToast('Please enter your first and last name', 'warning');
       setIsLoading(false);
       return;
     }
     if (!signUpData.email.trim()) {
       setError('Please enter your email address');
+      showToast('Please enter your email address', 'warning');
       setIsLoading(false);
       return;
     }
     if (signUpData.password.length < 6) {
       setError('Password must be at least 6 characters long');
+      showToast('Password must be at least 6 characters long', 'warning');
       setIsLoading(false);
       return;
     }
     if (signUpData.password !== signUpData.confirmPassword) {
       setError('Passwords do not match');
+      showToast('Passwords do not match', 'warning');
       setIsLoading(false);
       return;
     }
@@ -77,8 +83,10 @@ export default function ModernAnimatedSignUp() {
         // If the message indicates email confirmation is required, show message and do not redirect
         if (result.message && result.message.toLowerCase().includes('confirmation')) {
           setSuccess(result.message);
+          showToast(result.message, 'info');
         } else {
           setSuccess(result.message || 'Account created successfully!');
+          showToast(result.message || 'Account created successfully!', 'success');
           setTimeout(() => {
             router.push('/profile');
           }, 1200);
@@ -92,12 +100,15 @@ export default function ModernAnimatedSignUp() {
           errorMsg.includes('user already exists')
         ) {
           setError('An account with this email already exists.');
+          showToast('An account with this email already exists.', 'error');
         } else {
           setError(result.error || 'Failed to sign up');
+          showToast(result.error || 'Failed to sign up', 'error');
         }
       }
     } catch (err) {
       setError('An unexpected error occurred. Please try again.');
+      showToast('An unexpected error occurred. Please try again.', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -110,12 +121,13 @@ export default function ModernAnimatedSignUp() {
     await AuthService.signInWithProvider('google');
     setIsLoading(false);
   };
-  const handleGitHub = async () => {
-    setIsLoading(true);
-    setError(null);
-    await AuthService.signInWithProvider('github');
-    setIsLoading(false);
-  };
+  // GitHub sign-in temporarily disabled due to account linking issues
+  // const handleGitHub = async () => {
+  //   setIsLoading(true);
+  //   setError(null);
+  //   await AuthService.signInWithProvider('github');
+  //   setIsLoading(false);
+  // };
   // const handleApple = async () => {
   //   setIsLoading(true);
   //   setError(null);
@@ -176,7 +188,7 @@ export default function ModernAnimatedSignUp() {
     ],
     submitButton: isLoading ? 'Creating Account...' : 'Create Account',
     textVariantButton: 'Already have an account? Sign in',
-    errorField: error || undefined,
+    errorField: undefined, // Removed - using toast notifications instead
   };
 
   return (
@@ -196,16 +208,8 @@ export default function ModernAnimatedSignUp() {
             // Pass social login handlers to AuthDock via AnimatedForm
             googleLogin="Social Login"
             onGoogleClick={handleGoogle}
-            onGithubClick={handleGitHub}
+            // onGithubClick={handleGitHub} // GitHub sign-in temporarily disabled
           />
-          {success && (
-            <div className="mt-4 text-green-500 text-center text-sm">
-              {success}
-              {success.toLowerCase().includes('confirmation') && (
-                <div className="mt-2 text-cyan-400">Check your email for a confirmation link to activate your account.</div>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </div>

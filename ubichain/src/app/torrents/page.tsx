@@ -98,9 +98,41 @@ export default function TorrentsPage() {
                   <button
                     type="button"
                     onClick={async () => {
-                      await navigator.clipboard.writeText(t.magnetURI);
-                      setNotification('Magnet link copied to clipboard!');
-                      setTimeout(() => setNotification(null), 2000);
+                      try {
+                        // Check if Clipboard API is available (requires HTTPS)
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                          await navigator.clipboard.writeText(t.magnetURI);
+                          setNotification('Magnet link copied to clipboard!');
+                          setTimeout(() => setNotification(null), 2000);
+                        } else {
+                          // Fallback: Use a temporary textarea element for older browsers or HTTP
+                          const textarea = document.createElement('textarea');
+                          textarea.value = t.magnetURI;
+                          textarea.style.position = 'fixed';
+                          textarea.style.opacity = '0';
+                          document.body.appendChild(textarea);
+                          textarea.select();
+                          try {
+                            const successful = document.execCommand('copy');
+                            if (successful) {
+                              setNotification('Magnet link copied to clipboard!');
+                              setTimeout(() => setNotification(null), 2000);
+                            } else {
+                              // If execCommand fails, show the magnet URI in an alert for manual copying
+                              alert(`Magnet URI:\n\n${t.magnetURI}\n\nPlease copy this manually.`);
+                            }
+                          } catch (err) {
+                            // If all methods fail, show the magnet URI in an alert
+                            alert(`Magnet URI:\n\n${t.magnetURI}\n\nPlease copy this manually.`);
+                          } finally {
+                            document.body.removeChild(textarea);
+                          }
+                        }
+                      } catch (err: any) {
+                        // If clipboard API fails, show the magnet URI in an alert
+                        console.error('Failed to copy to clipboard:', err);
+                        alert(`Magnet URI:\n\n${t.magnetURI}\n\nPlease copy this manually.\n\nNote: Clipboard API requires HTTPS.`);
+                      }
                     }}
                     className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-cyan-300 ring-1 ring-inset ring-cyan-700 hover:bg-cyan-900"
                   >
