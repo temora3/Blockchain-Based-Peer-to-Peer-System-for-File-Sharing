@@ -46,7 +46,18 @@ export function EnhancedImageUpload({
 
       // Get current user
       const { data: { user }, error: userError } = await supabase.auth.getUser();
-      if (userError || !user) {
+      
+      // Handle refresh token errors gracefully
+      if (userError) {
+        if (userError.message?.includes('Refresh Token') || userError.message?.includes('refresh_token')) {
+          console.log('Invalid refresh token detected during image upload, clearing session');
+          await supabase.auth.signOut();
+          throw new Error('Session expired. Please sign in again.');
+        }
+        throw new Error(`Authentication error: ${userError.message}`);
+      }
+      
+      if (!user) {
         throw new Error('User not authenticated');
       }
 

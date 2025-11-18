@@ -15,6 +15,14 @@ async function main() {
   await registry.waitForDeployment();
   const registryAddress = await registry.getAddress();
   console.log("FileRegistry deployed:", registryAddress);
+
+  console.log("\n" + "=".repeat(60));
+  console.log("✅ DEPLOYMENT SUCCESSFUL!");
+  console.log("=".repeat(60));
+  console.log("\nAdd these addresses to ubichain/.env.local:\n");
+  console.log(`NEXT_PUBLIC_REGISTRY_ADDRESS=${registryAddress}`);
+  console.log(`NEXT_PUBLIC_TOKEN_ADDRESS=${tokenAddress}`);
+  console.log("\n" + "=".repeat(60));
 }
 
 main().catch((error) => {

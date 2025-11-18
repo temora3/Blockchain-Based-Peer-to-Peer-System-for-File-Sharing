@@ -1,16 +1,12 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Montserrat } from "next/font/google";
 import "./globals.css";
 import AppShell from "@/components/AppShell";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const montserrat = Montserrat({
+  variable: "--font-montserrat",
   subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -25,7 +21,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <body className={`${montserrat.variable} font-sans antialiased min-h-screen bg-gradient-to-br from-[#0a0303] via-[#2d0f0f] to-[#050202] relative`}>
+        {/* Animated background layers for depth - velvety red */}
+        <div className="fixed inset-0 -z-10">
+          <div className="absolute inset-0 bg-gradient-to-br from-[#CC2E28]/8 via-[#CC2E28]/5 to-[#CC2E28]/3 animate-pulse"></div>
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(204,46,40,0.12),transparent_55%)]"></div>
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_80%,rgba(204,46,40,0.08),transparent_55%)]"></div>
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(204,46,40,0.06),transparent_70%)]"></div>
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_70%,rgba(139,35,35,0.05),transparent_60%)]"></div>
+        </div>
         <AppShell>{children}</AppShell>
       </body>
     </html>

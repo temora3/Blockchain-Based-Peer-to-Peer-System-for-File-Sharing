@@ -86,7 +86,7 @@ function DockIcon({ icon, onClick, ariaLabel }: {
       role="button"
       aria-label={ariaLabel}
       tabIndex={0}
-      onKeyDown={(e) => {
+      onKeyDown={(e: React.KeyboardEvent) => {
         if (e.key === 'Enter' || e.key === ' ') {
           onClick();
         }
@@ -99,8 +99,11 @@ function DockIcon({ icon, onClick, ariaLabel }: {
 
 // auth dock component
 export default function AuthDock({ 
-  onGithubClick = () => console.log('GitHub login'),
-  onGoogleClick = () => console.log('Google login'),
+  onGithubClick,
+  onGoogleClick,
+}: {
+  onGithubClick?: () => void;
+  onGoogleClick?: () => void;
 }) {
   const [pos, setPos] = useState({ x: 0, y: 0 });
 
@@ -122,16 +125,22 @@ export default function AuthDock({
           onMouseLeave={onMouseLeave}
           className="flex h-20 items-end gap-3 rounded-2xl bg-zinc-900/80 px-4 pb-4 border border-zinc-600 backdrop-blur-sm"
         >
-          <DockIcon 
-            icon={<GithubIcon />} 
-            onClick={onGithubClick}
-            ariaLabel="Sign in with GitHub"
-          />
-          <DockIcon 
-            icon={<GoogleIcon />} 
-            onClick={onGoogleClick}
-            ariaLabel="Sign in with Google"
-          />
+          {/* Only show GitHub button if onGithubClick is provided */}
+          {onGithubClick && (
+            <DockIcon 
+              icon={<GithubIcon />} 
+              onClick={onGithubClick}
+              ariaLabel="Sign in with GitHub"
+            />
+          )}
+          {/* Only show Google button if onGoogleClick is provided */}
+          {onGoogleClick && (
+            <DockIcon 
+              icon={<GoogleIcon />} 
+              onClick={onGoogleClick}
+              ariaLabel="Sign in with Google"
+            />
+          )}
         </div>
       </div>
     </MouseContext.Provider>

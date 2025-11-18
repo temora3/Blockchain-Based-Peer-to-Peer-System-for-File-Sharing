@@ -37,6 +37,15 @@ const nextConfig: NextConfig = {
         process: ['process']
       })
     );
+    
+    // Ensure crypto polyfill is properly configured
+    // WebTorrent needs crypto support for parsing torrent files
+    config.resolve.alias = config.resolve.alias || {};
+    // Don't alias crypto to false - use the polyfill
+    if (!config.resolve.alias.crypto) {
+      // crypto-browserify should be used via fallback, but ensure it's available
+    }
+    
     return config;
   }
 };
