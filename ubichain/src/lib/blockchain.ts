@@ -87,8 +87,28 @@ export async function registerFileOnChain(
     }
 
     // Register the file
+    console.log('📤 Sending transaction to register file on blockchain...');
+    console.log('Contract address:', REGISTRY_ADDRESS);
+    console.log('File name:', fileName);
+    console.log('Magnet URI:', magnetURI);
+    console.log('Content hash:', contentHashBytes32);
+    
     const tx = await registry.registerFile(fileName, magnetURI, contentHashBytes32);
+    console.log('⏳ Transaction sent! Hash:', tx.hash);
+    console.log('⏳ Waiting for transaction confirmation...');
+    
     const receipt = await tx.wait();
+    console.log('✅ Transaction confirmed! Receipt:', receipt);
+    
+    // Check if transaction was successful
+    if (!receipt || receipt.status !== 1) {
+      throw new Error(`Transaction failed or reverted. Receipt status: ${receipt?.status}`);
+    }
+    
+    console.log('✅ Transaction status: SUCCESS');
+    console.log('✅ Transaction hash:', receipt.hash);
+    console.log('✅ Block number:', receipt.blockNumber);
+    console.log('✅ Gas used:', receipt.gasUsed?.toString());
 
     // Find the FileRegistered event
     const event = receipt.logs.find((log: any) => {
@@ -104,6 +124,9 @@ export async function registerFileOnChain(
     if (event) {
       const parsed = registry.interface.parseLog(event);
       registeredFileId = parsed?.args[0] || fileId;
+      console.log('✅ FileRegistered event found! File ID:', registeredFileId);
+    } else {
+      console.warn('⚠️ FileRegistered event not found in receipt logs');
     }
 
     return {

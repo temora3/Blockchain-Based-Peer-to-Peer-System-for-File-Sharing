@@ -105,6 +105,7 @@ type ProfileUser = {
   providers?: string[];
   emailVerified?: boolean;
   profilePic?: string | null;
+  role?: 'user' | 'admin';
 };
 
 type TabKey = "overview" | "account" | "security" | "sessions" | "providers" | "keys" | "danger";
@@ -284,7 +285,26 @@ export default function UserProfile() {
 
   useEffect(() => {
     async function load() {
-      const { data } = await supabase.auth.getUser();
+      try {
+        const { data, error } = await supabase.auth.getUser();
+        
+        // Handle refresh token errors gracefully
+        if (error) {
+          console.error('Auth error:', error);
+          
+          // If it's a refresh token error, clear the session and redirect to sign in
+          if (error.message?.includes('Refresh Token') || error.message?.includes('refresh_token')) {
+            console.log('Invalid refresh token detected, clearing session and redirecting to sign in');
+            await supabase.auth.signOut();
+            router.push("/signin");
+            return;
+          }
+          
+          // For other auth errors, also redirect to sign in
+          router.push("/signin");
+          return;
+        }
+        
       const supaUser = data?.user;
       if (!supaUser) {
         router.push("/signin");
@@ -292,6 +312,49 @@ export default function UserProfile() {
       }
       const meta = (supaUser.user_metadata || {}) as Record<string, any>;
       const appMeta = (supaUser.app_metadata || {}) as Record<string, any>;
+        
+        // Fetch role from profiles table
+        let userRole: 'user' | 'admin' = 'user';
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', supaUser.id)
+          .single();
+        
+        if (profileError) {
+          // If role column doesn't exist, try to add it by upserting
+          if (profileError.message?.includes('column') && profileError.message?.includes('role')) {
+            console.warn('Role column may not exist. Attempting to add it...');
+            const { error: upsertError } = await supabase
+              .from('profiles')
+              .upsert({
+                id: supaUser.id,
+                role: 'user',
+              }, {
+                onConflict: 'id',
+              });
+            
+            if (upsertError) {
+              console.warn('Could not add role column automatically. Please run: ALTER TABLE profiles ADD COLUMN IF NOT EXISTS role TEXT DEFAULT \'user\';');
+            } else {
+              userRole = 'user';
+            }
+          } else {
+            // Other error, default to 'user'
+            userRole = 'user';
+          }
+        } else {
+          userRole = (profile?.role as 'user' | 'admin') || 'user';
+          
+          // If role is null/undefined, update it to 'user'
+          if (!profile?.role) {
+            await supabase
+              .from('profiles')
+              .update({ role: 'user' })
+              .eq('id', supaUser.id);
+          }
+        }
+        
       const profileUser: ProfileUser = {
         id: supaUser.id,
         email: supaUser.email ?? null,
@@ -303,12 +366,22 @@ export default function UserProfile() {
         providers: (appMeta.providers as string[]) || [],
         emailVerified: Boolean((supaUser as any).email_confirmed_at),
         profilePic: meta.profile_pic || null,
+          role: userRole,
       };
       setUser(profileUser);
       setFirstName(profileUser.firstName || "");
       setLastName(profileUser.lastName || "");
       setProfilePicUrl(meta.profile_pic || null);
       setLoading(false);
+      } catch (err: any) {
+        console.error('Error loading user profile:', err);
+        // If it's a refresh token error, handle it
+        if (err?.message?.includes('Refresh Token') || err?.message?.includes('refresh_token')) {
+          console.log('Invalid refresh token detected, clearing session and redirecting to sign in');
+          await supabase.auth.signOut();
+        }
+        router.push("/signin");
+      }
     }
     if (mounted) {
     load();
@@ -365,11 +438,8 @@ export default function UserProfile() {
   // Prevent hydration mismatch by not rendering loading state until mounted
   if (!mounted || loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-950 to-black grid place-items-center relative overflow-hidden">
-        <div className="fixed inset-0 -z-10">
-          <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-purple-500/10 to-pink-500/10 animate-pulse"></div>
-        </div>
-        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl px-6 py-4 shadow-2xl shadow-purple-500/10">
+      <div className="min-h-screen grid place-items-center relative">
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl px-6 py-4 shadow-2xl shadow-[#CC2E28]/10">
           <div className="text-white/90">Loading your profile…</div>
         </div>
       </div>
@@ -381,17 +451,11 @@ export default function UserProfile() {
   const initials = (user.fullName || user.email || "U").split(" ").map((s) => s[0]?.toUpperCase()).slice(0, 2).join("");
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-950 to-black relative overflow-hidden">
-      {/* Animated background layers for depth */}
-      <div className="fixed inset-0 -z-10">
-        <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/10 via-purple-500/10 to-pink-500/10 animate-pulse"></div>
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(120,119,198,0.15),transparent_50%)]"></div>
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_70%_80%,rgba(59,130,246,0.15),transparent_50%)]"></div>
-      </div>
+    <div className="min-h-screen relative pt-20">
       
       <div className="mx-auto max-w-6xl px-4 py-10 relative z-10">
         {/* Header */}
-        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-purple-500/10 relative overflow-hidden">
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-[#CC2E28]/10 relative overflow-hidden">
           {/* Glass reflection effect */}
           <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
           <div className="relative">
@@ -442,7 +506,7 @@ export default function UserProfile() {
         {/* Body */}
         <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
           {/* Sidebar */}
-          <aside className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl shadow-2xl shadow-purple-500/10 p-3 relative overflow-hidden">
+          <aside className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl shadow-2xl shadow-[#CC2E28]/10 p-3 relative overflow-hidden">
             {/* Glass reflection */}
             <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
             <div className="relative space-y-1.5">
@@ -456,7 +520,7 @@ export default function UserProfile() {
           </aside>
 
           {/* Content */}
-          <main className="min-h-[520px] rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-purple-500/10 relative overflow-hidden">
+          <main className="min-h-[520px] rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-[#CC2E28]/10 relative overflow-hidden">
             {/* Glass reflection */}
             <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
             <div className="relative">
@@ -580,7 +644,7 @@ export default function UserProfile() {
                     {!editingName ? (
                       <button
                         onClick={() => setEditingName(true)}
-                        className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700"
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-300 shadow-lg shadow-black/20"
                       >
                         Edit Name
                       </button>
@@ -1065,7 +1129,7 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; labe
       onClick={onClick}
       className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-base font-medium transition-all duration-300 relative overflow-hidden
         ${active
-          ? "bg-gradient-to-br from-cyan-500/30 to-purple-500/30 text-white shadow-lg shadow-cyan-500/20 border border-white/30 backdrop-blur-md scale-[1.02]"
+          ? "bg-gradient-to-br from-[#CC2E28]/30 to-[#CC2E28]/20 text-white shadow-lg shadow-[#CC2E28]/20 border border-white/30 backdrop-blur-md scale-[1.02]"
           : "text-white/70 hover:bg-white/10 hover:text-white border border-transparent hover:border-white/20"}
       `}
     >

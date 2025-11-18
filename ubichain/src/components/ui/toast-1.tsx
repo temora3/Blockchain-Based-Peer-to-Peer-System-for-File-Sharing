@@ -97,7 +97,7 @@ const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, position }) => 
   };
 
   return (
-    <div className={`fixed ${getPositionClasses()} w-full max-w-full sm:max-w-sm px-4 sm:px-0 space-y-2`}>
+    <div className={`fixed ${getPositionClasses()} z-[9999] w-full max-w-full sm:max-w-sm px-4 sm:px-0 space-y-2 pointer-events-none`}>
       <AnimatePresence>
         {toasts.map(({ toast }) => (
           <motion.div
@@ -106,6 +106,7 @@ const ToastContainer: React.FC<ToastContainerProps> = ({ toasts, position }) => 
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: getInitialY() }}
             transition={{ duration: 0.4, ease: 'easeInOut' }}
+            className="pointer-events-auto"
           >
             <ToastComponent {...toast} />
           </motion.div>

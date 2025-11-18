@@ -26,10 +26,14 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const userId = searchParams.get('userId');
+  const includeRemoved = searchParams.get('includeRemoved') === 'true';
   try {
     const client = await clientPromise;
     const db = client.db();
-    const filter = userId ? { userId } : {};
+    const filter: any = userId ? { userId } : {};
+    if (!includeRemoved) {
+      filter.removed = { $ne: true };
+    }
     const torrents = await db.collection('torrents').find(filter).sort({ createdAt: -1 }).toArray();
     return NextResponse.json({ torrents });
   } catch (error) {

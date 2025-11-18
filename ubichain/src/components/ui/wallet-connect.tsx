@@ -81,24 +81,28 @@ export function WalletConnect() {
 
   if (isConnected && address) {
     return (
-      <div className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-2">
-        <CheckCircle2 className="h-4 w-4 text-green-500" />
-        <div className="flex flex-col">
-          <span className="text-xs text-zinc-400">Connected</span>
-          <span className="text-sm font-mono text-zinc-200">{formatAddress(address)}</span>
-        </div>
-        {chainId && (
-          <div className="flex flex-col">
-            <span className="text-xs text-zinc-400">Chain</span>
-            <span className="text-xs text-zinc-300">{chainId}</span>
+      <div className="flex items-center gap-4 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl px-4 py-3 shadow-lg shadow-black/10 relative overflow-hidden">
+        {/* Glass reflection effect */}
+        <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+        <div className="relative flex items-center gap-4 w-full">
+          <CheckCircle2 className="h-5 w-5 text-green-400 flex-shrink-0" />
+          <div className="flex flex-col min-w-0 flex-1">
+            <span className="text-xs text-white/60">Connected</span>
+            <span className="text-sm font-mono text-white/90 truncate">{formatAddress(address)}</span>
           </div>
-        )}
-        <button
-          onClick={handleDisconnect}
-          className="ml-2 rounded px-2 py-1 text-xs text-zinc-400 hover:text-zinc-200"
-        >
-          Disconnect
-        </button>
+          {chainId && (
+            <div className="flex flex-col min-w-0">
+              <span className="text-xs text-white/60">Chain</span>
+              <span className="text-xs text-white/80 font-medium">{chainId}</span>
+            </div>
+          )}
+          <button
+            onClick={handleDisconnect}
+            className="ml-auto rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2 text-sm font-medium text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-300 shadow-lg shadow-black/20 flex-shrink-0"
+          >
+            Disconnect
+          </button>
+        </div>
       </div>
     );
   }
@@ -149,7 +153,7 @@ export function WalletConnect() {
     <button
       onClick={handleConnect}
       disabled={isConnecting}
-      className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-900/60 disabled:opacity-50"
+      className="flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-300 shadow-lg shadow-black/20 disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {isConnecting ? (
         <>

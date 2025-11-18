@@ -9,6 +9,8 @@ import { Buffer } from 'buffer';
 import JSZip from 'jszip';
 import { useToast } from '@/components/ui/toast-1';
 import Folder from '@/components/Folder';
+import { useWallet } from '@/hooks/use-wallet';
+import { WalletConnect } from '@/components/ui/wallet-connect';
 
 // Helper function to format bytes to human-readable size (KB, MB, GB, TB)
 function formatBytes(bytes: number): string {
@@ -37,6 +39,7 @@ export default function DownloadPage() {
   const [isDownloadComplete, setIsDownloadComplete] = useState<boolean>(false);
   const [fileCount, setFileCount] = useState<number>(0);
   const { showToast } = useToast();
+  const wallet = useWallet();
 
   // Global error handler for unhandled promise rejections (e.g., crypto errors in WebTorrent)
   useEffect(() => {
@@ -83,6 +86,14 @@ export default function DownloadPage() {
 
   // Download handler for both magnet and .torrent file
   const handleDownload = async (inputMagnet?: string, inputTorrentFile?: File) => {
+    // Check wallet connection first
+    if (!wallet.isConnected || !wallet.address) {
+      setStatus('Please connect your wallet to download files.');
+      showToast('Wallet connection required. Please connect your MetaMask wallet to download files.', 'warning');
+      setIsDownloading(false);
+      return;
+    }
+    
     setFiles([]);
     setStatus('Connecting to peers...');
     setPeerCount(0);
@@ -229,6 +240,24 @@ export default function DownloadPage() {
         
         // Try adding with Blob first, if it fails, we'll catch and try Buffer
         let torrent: any;
+        
+        // Check if torrent already exists in client before trying to add
+        if (infoHash) {
+          const existingTorrent = client.get(infoHash.toLowerCase());
+          if (existingTorrent && !existingTorrent.destroyed) {
+            console.log('⚠️ Torrent already exists in client, using existing instance');
+            setStatus('Torrent is already being downloaded. Using existing download.');
+            showToast('Torrent is already being downloaded', 'info');
+            torrent = existingTorrent;
+            setCurrentTorrent(torrent);
+            setPeerCount(torrent.wires?.length || torrent.numPeers || 0);
+            setDownloadProgress(torrent.progress ? Math.round(torrent.progress * 100) : 0);
+            setIsDownloading(true);
+            // Set up event listeners for existing torrent
+            // (The rest of the setup will happen in the existing torrent handlers)
+            return; // Exit early, use existing torrent
+          }
+        }
         
         try {
           console.log('Attempting to add torrent using Blob...');
@@ -1071,11 +1100,28 @@ export default function DownloadPage() {
         showToast('Invalid .torrent file format', 'error');
         setIsDownloading(false);
         setIsDownloadComplete(false);
-      } else if (err.message && err.message.includes('duplicate')) {
+      } else if (err.message && (err.message.includes('duplicate') || err.message.includes('Cannot add duplicate'))) {
         console.warn('⚠️ Duplicate torrent detected');
-        setStatus('Torrent is already being seeded. Use existing active torrent in Profile → Seeding.');
+        setStatus('Torrent is already being downloaded. If you want to download it again, please remove it from the active downloads first.');
         showToast('Torrent is already being downloaded', 'info');
         setIsDownloading(false);
+        
+        // Try to find and use the existing torrent
+        if (infoHash) {
+          try {
+            const existingTorrent = client.get(infoHash.toLowerCase());
+            if (existingTorrent && !existingTorrent.destroyed) {
+              console.log('Found existing torrent, switching to it');
+              setCurrentTorrent(existingTorrent);
+              setPeerCount(existingTorrent.wires?.length || existingTorrent.numPeers || 0);
+              setDownloadProgress(existingTorrent.progress ? Math.round(existingTorrent.progress * 100) : 0);
+              setIsDownloading(true);
+              // The existing torrent will continue downloading
+            }
+          } catch (e) {
+            console.error('Error accessing existing torrent:', e);
+          }
+        }
       } else {
         console.error('❌ Failed to add torrent to client');
         setStatus(`Error: ${err.message || 'Failed to add torrent'}`);
@@ -1086,26 +1132,51 @@ export default function DownloadPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black">
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 backdrop-blur">
+    <div className="min-h-screen relative pt-20">
+      <div className="mx-auto max-w-3xl px-4 py-10 relative z-10">
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-[#CC2E28]/10 relative overflow-hidden">
+          {/* Glass reflection effect */}
+          <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+          <div className="relative">
           <div className="mb-4">
             <div className="text-white text-xl font-semibold">Download via Magnet Link or .torrent File</div>
-            <div className="text-sm text-zinc-400">Paste a magnet URI or upload a .torrent file to fetch files and start seeding</div>
-
+            <div className="text-sm text-white/60">Paste a magnet URI or upload a .torrent file to fetch files and start seeding</div>
+          </div>
+          
+          {/* Wallet connection section */}
+          <div className="mb-6">
+            <WalletConnect />
+          </div>
+          
+          {!wallet.isConnected && (
+            <div className="mb-4 rounded-xl border border-yellow-400/30 bg-yellow-500/10 backdrop-blur-md px-4 py-3 text-yellow-200 text-sm font-medium shadow-lg shadow-yellow-500/10">
+              ⚠️ Wallet connection required. Please connect your MetaMask wallet to download files.
+            </div>
+          )}
 
             {/* Upload .torrent file section (moved to top) */}
             <div className="space-y-2">
-              <label className="text-sm text-zinc-300">Upload a .torrent file</label>
+              <label className="text-sm text-white/80">Upload a .torrent file</label>
               <div
-                tabIndex={0}
+                tabIndex={wallet.isConnected ? 0 : -1}
                 role="button"
                 aria-label="Torrent file upload area"
-                onClick={() => fileInputRef.current?.click()}
-                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
-                onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                onClick={() => {
+                  if (wallet.isConnected) {
+                    fileInputRef.current?.click();
+                  } else {
+                    showToast('Please connect your wallet first', 'warning');
+                  }
+                }}
+                onKeyDown={e => { if (wallet.isConnected && (e.key === 'Enter' || e.key === ' ')) fileInputRef.current?.click(); }}
+                onDragOver={e => { if (wallet.isConnected) { e.preventDefault(); setIsDragging(true); } }}
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={e => {
+                  if (!wallet.isConnected) {
+                    e.preventDefault();
+                    showToast('Please connect your wallet first', 'warning');
+                    return;
+                  }
                   e.preventDefault();
                   setIsDragging(false);
                   const f = e.dataTransfer.files?.[0];
@@ -1119,24 +1190,24 @@ export default function DownloadPage() {
                     setTorrentFile(f);
                   }
                 }}
-                className={`relative rounded-xl border border-dashed ${isDragging ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-zinc-700 bg-zinc-950/60'} p-8 text-center cursor-pointer hover:bg-zinc-900/60 w-full`}
+                className={`relative rounded-2xl border border-dashed ${!wallet.isConnected ? 'opacity-50 cursor-not-allowed' : isDragging ? 'border-cyan-500/60 bg-cyan-500/10 backdrop-blur-md' : 'border-white/20 bg-white/5 backdrop-blur-xl'} p-8 text-center ${wallet.isConnected ? 'cursor-pointer hover:bg-white/10 hover:border-white/30' : ''} transition-all duration-300 shadow-lg shadow-black/10 w-full`}
                 style={{ outline: 'none', minHeight: '120px' }}
               >
                 {!torrentFile && (
                   <div className="flex flex-col items-center gap-3 pb-4">
-                    <div className="h-12 w-12 grid place-items-center rounded-full bg-zinc-800/60 text-zinc-300 mx-auto">
+                    <div className="h-12 w-12 grid place-items-center rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-white/80 mx-auto">
                       <ImagePlus size={22} />
                     </div>
-                    <div className="text-zinc-200 font-medium">Click to select</div>
-                    <div className="text-xs text-zinc-500">or drag and drop .torrent file here</div>
+                    <div className="text-white/90 font-medium">Click to select</div>
+                    <div className="text-xs text-white/60">or drag and drop .torrent file here</div>
                   </div>
                 )}
                 {torrentFile && (
-                  <div className="flex items-center justify-between text-xs text-zinc-400 mt-4">
+                  <div className="flex items-center justify-between text-xs text-white/80 mt-4">
                     <div className="truncate">{torrentFile.name}</div>
                     <button
                       onClick={() => { handleRemove(); setTorrentFile(null); }}
-                      className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
+                      className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10"
                     >
                       Remove
                     </button>
@@ -1155,30 +1226,37 @@ export default function DownloadPage() {
                 />
               </div>
               <button
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60 mt-2"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10 disabled:opacity-60 disabled:cursor-not-allowed mt-2"
                 onClick={() => handleDownload(undefined, torrentFile || undefined)}
-                disabled={!torrentFile}
+                disabled={!torrentFile || !wallet.isConnected}
               >
-                {torrentFile ? 'Download & Seed from .torrent' : 'Select a .torrent file'}
+                {!wallet.isConnected ? 'Connect wallet to download' : torrentFile ? 'Download & Seed from .torrent' : 'Select a .torrent file'}
               </button>
             </div>
 
             {/* Magnet URI section (moved below) */}
             <div className="space-y-2">
-              <label className="text-sm text-zinc-300">Or paste a Magnet URI</label>
+              <label className="text-sm text-white/80">Or paste a Magnet URI</label>
               <textarea
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200"
+                className={`w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-white/30 transition-all ${!wallet.isConnected ? 'opacity-50 cursor-not-allowed' : ''}`}
                 rows={3}
                 placeholder="magnet:?xt=urn:btih:..."
                 value={magnet}
-                onChange={e => setMagnet(e.target.value)}
+                onChange={e => {
+                  if (wallet.isConnected) {
+                    setMagnet(e.target.value);
+                  } else {
+                    showToast('Please connect your wallet first', 'warning');
+                  }
+                }}
+                disabled={!wallet.isConnected}
               />
               <button
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60 mt-2"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10 disabled:opacity-60 disabled:cursor-not-allowed mt-2"
                 onClick={() => handleDownload(magnet, undefined)}
-                disabled={!magnet}
+                disabled={!magnet || !wallet.isConnected}
               >
-                {magnet ? 'Download & Seed' : 'Paste a magnet link'}
+                {!wallet.isConnected ? 'Connect wallet to download' : magnet ? 'Download & Seed' : 'Paste a magnet link'}
               </button>
             </div>
 
@@ -1186,7 +1264,10 @@ export default function DownloadPage() {
             {/* Animated download progress bar */}
             {isDownloading && (
               <div className="my-6">
-                <div className="rounded-xl bg-zinc-900/90 p-6 shadow-lg border border-cyan-700">
+                <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 shadow-lg shadow-black/10 relative overflow-hidden">
+                  {/* Glass reflection effect */}
+                  <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                  <div className="relative">
                   <AnimatedDownload 
                     isAnimating={isDownloading} 
                     className="text-white"
@@ -1203,6 +1284,7 @@ export default function DownloadPage() {
                       </span>
                     )}
                   </div>
+                  </div>
                 </div>
               </div>
             )}
@@ -1210,7 +1292,7 @@ export default function DownloadPage() {
             {/* Status and manual retry */}
             <div className="flex items-center justify-between">
               {status && !status.includes('❌') && !status.includes('⚠️') && !status.includes('Faulty') && !status.includes('Failed') && !status.includes('Warning') && !status.includes('ready') && !status.includes('complete') && (
-                <div className="text-sm text-zinc-300 flex-1">
+                <div className="text-sm text-white/80 flex-1">
                   {status}
                 </div>
               )}
@@ -1261,7 +1343,7 @@ export default function DownloadPage() {
                       showToast(`Failed to extract: ${err.message || 'Unknown error'}`, 'error');
                     }
                   }}
-                  className="ml-4 text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
+                  className="ml-4 text-xs font-medium text-cyan-200 hover:text-cyan-100 px-4 py-2 rounded-xl border border-cyan-400/40 bg-cyan-500/20 backdrop-blur-md hover:bg-cyan-500/30 hover:border-cyan-400/50 transition-all duration-200 shadow-lg shadow-cyan-500/20"
                 >
                   Extract Files
                 </button>
@@ -1271,7 +1353,7 @@ export default function DownloadPage() {
             {files.length > 0 && (
               <div className="mt-4 space-y-2">
                 <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm text-zinc-300">
+                  <div className="text-sm text-white/80">
                     {files.length === 1 ? 'File' : `${files.length} Files`}
                   </div>
                   {/* Show ZIP option if multiple files OR if single file has folder structure */}
@@ -1387,7 +1469,7 @@ export default function DownloadPage() {
                           showToast(`Failed to create ZIP: ${err.message || 'Unknown error'}`, 'error');
                         }
                       }}
-                      className="text-xs text-cyan-400 hover:text-cyan-300 px-3 py-1.5 rounded-md border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20"
+                      className="text-xs font-medium text-cyan-200 hover:text-cyan-100 px-4 py-2 rounded-xl border border-cyan-400/40 bg-cyan-500/20 backdrop-blur-md hover:bg-cyan-500/30 hover:border-cyan-400/50 transition-all duration-200 shadow-lg shadow-cyan-500/20"
                     >
                       📦 Download as ZIP
                     </button>
@@ -1395,7 +1477,7 @@ export default function DownloadPage() {
                 </div>
                 
                 {/* Folder Component Display */}
-                <div className="relative rounded-xl border border-zinc-700 bg-zinc-950/60 p-8 mb-4">
+                <div className="relative rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 mb-4 shadow-lg shadow-black/10">
                   <div className="flex flex-col items-center gap-6">
                     {/* Folder Component */}
                     <Folder
@@ -1403,8 +1485,8 @@ export default function DownloadPage() {
                       size={1.2}
                       items={files.slice(0, 3).map((file, index) => (
                         <div key={index} className="flex flex-col items-center justify-center h-full p-2">
-                          <FileText className="text-zinc-700 mb-1" size={24} />
-                          <span className="text-[10px] text-zinc-600 text-center px-1 truncate w-full">
+                          <FileText className="text-white/70 mb-1" size={24} />
+                          <span className="text-[10px] text-white/80 text-center px-1 truncate w-full">
                             {file.name.length > 15 ? `${file.name.substring(0, 12)}...` : file.name}
                           </span>
                         </div>
@@ -1414,7 +1496,7 @@ export default function DownloadPage() {
                     
                     {/* File info */}
                     <div className="text-center space-y-2 w-full">
-                      <div className="text-zinc-200 font-medium">
+                      <div className="text-white/90 font-medium">
                         {files.length === 1 ? (
                           files[0].name
                         ) : (
@@ -1422,14 +1504,14 @@ export default function DownloadPage() {
                         )}
                       </div>
                       {files.length > 1 && (
-                        <div className="text-xs text-zinc-400 max-h-32 overflow-y-auto space-y-1">
+                        <div className="text-xs text-white/70 max-h-32 overflow-y-auto space-y-1">
                           {files.slice(0, 5).map((f, i) => (
-                            <div key={i} className="text-xs text-zinc-500 truncate">
+                            <div key={i} className="text-xs text-white/60 truncate">
                               • {f.path || f.name} ({formatBytes(f.size)})
                             </div>
                           ))}
                           {files.length > 5 && (
-                            <div className="text-xs text-zinc-500">
+                            <div className="text-xs text-white/60">
                               ... and {files.length - 5} more file{files.length - 5 > 1 ? 's' : ''}
                             </div>
                           )}
@@ -1440,29 +1522,33 @@ export default function DownloadPage() {
                 </div>
                 
                 <div className="max-h-96 overflow-y-auto space-y-2">
-                  <div className="text-xs text-zinc-500 mb-2 px-1">
+                  <div className="text-xs text-white/60 mb-2 px-1">
                     {(files.length > 1 || (files.length === 1 && files[0].path && files[0].path.includes('/')))
                       ? '💡 Tip: Use "Download as ZIP" above to download with preserved folder structure, or download individually below.'
                       : 'Click Save to download this file.'}
                   </div>
                   {files.map((f, i) => (
-                    <div key={i} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+                    <div key={i} className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-3 shadow-lg shadow-black/10 relative overflow-hidden">
+                      {/* Glass reflection effect */}
+                      <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                      <div className="relative flex items-center justify-between w-full">
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm text-zinc-100 truncate">{f.name}</div>
+                        <div className="text-sm text-white/90 truncate">{f.name}</div>
                         {f.path && f.path !== f.name && (
-                          <div className="text-xs text-zinc-500 truncate" title={f.path}>
+                          <div className="text-xs text-white/60 truncate" title={f.path}>
                             📁 {f.path}
                           </div>
                         )}
-                        <div className="text-xs text-zinc-500 mt-1">{formatBytes(f.size)}</div>
+                        <div className="text-xs text-white/60 mt-1">{formatBytes(f.size)}</div>
                       </div>
                       <a 
-                        className="text-sm text-cyan-400 hover:text-cyan-300 ml-2 flex-shrink-0 px-3 py-1.5 rounded-md border border-zinc-700/50 bg-zinc-800/30 hover:bg-zinc-800/50" 
+                        className="text-sm font-medium text-cyan-200 hover:text-cyan-100 ml-2 flex-shrink-0 px-4 py-2 rounded-xl border border-cyan-400/40 bg-cyan-500/20 backdrop-blur-md hover:bg-cyan-500/30 hover:border-cyan-400/50 transition-all duration-200 shadow-lg shadow-cyan-500/20" 
                         href={f.url} 
                         download={f.path || f.name}
                       >
                         Save
                       </a>
+                      </div>
                     </div>
                   ))}
                 </div>

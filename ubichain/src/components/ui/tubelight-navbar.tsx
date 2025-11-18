@@ -4,10 +4,10 @@ import React, { useEffect, useState } from "react"
 import { motion } from "framer-motion"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Home, Upload, Download, User2 } from "lucide-react"
+import { Home, Upload, Download, User2, Shield } from "lucide-react"
 import { cn } from "@/lib/utils"
 
-type IconKey = "home" | "share" | "download" | "profile" | "torrents"
+type IconKey = "home" | "share" | "download" | "profile" | "torrents" | "admin"
 
 interface NavItem {
   name: string
@@ -26,6 +26,7 @@ const ICONS: Record<IconKey, any> = {
   download: Download,
   profile: User2,
   torrents: Download, // reuse Download icon for Torrents
+  admin: Shield,
 }
 
 export function NavBar({ items, className }: NavBarProps) {
@@ -69,32 +70,41 @@ export function NavBar({ items, className }: NavBarProps) {
         className,
       )}
     >
-      <div className="flex items-center gap-2 bg-zinc-900/90 backdrop-blur-lg py-1 px-2 rounded-full shadow-2xl">
-        {navItems.map((item) => {
-          const Icon = item.icon ? ICONS[item.icon] : null;
-          const isActive = activeTab === item.name;
+      <div className="flex items-center gap-2 border border-white/10 bg-white/5 backdrop-blur-2xl py-1.5 px-3 rounded-full shadow-2xl shadow-purple-500/10 relative overflow-hidden">
+        {/* Glass reflection effect */}
+        <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+        <div className="relative flex items-center gap-2">
+          {navItems.map((item) => {
+            const Icon = item.icon ? ICONS[item.icon] : null;
+            const isActive = activeTab === item.name;
           return (
             <Link
               key={item.name}
               href={item.url}
               className={cn(
-                "relative cursor-pointer text-base font-bold px-6 py-2 rounded-full transition-colors border border-transparent",
-                "text-white hover:text-emerald-300",
-                isActive && "text-white shadow-lg bg-[#3C3E3E]",
-              )}
-            >
-              <span className="hidden md:inline">{item.name}</span>
-              <span className="md:hidden">
-                {Icon ? <Icon size={18} strokeWidth={2.5} color="white" /> : null}
+                  "relative cursor-pointer text-base font-semibold px-5 py-2.5 rounded-full transition-all duration-300 border",
+                  "text-white/80 hover:text-white hover:bg-white/10",
+                  isActive 
+                    ? "text-white border-white/30 bg-white/20 backdrop-blur-md shadow-lg shadow-white/20" 
+                    : "border-transparent hover:border-white/20",
+                )}
+              >
+                {/* Glass reflection for active state */}
+                {isActive && (
+                  <div className="absolute inset-0 bg-gradient-to-br from-white/20 via-white/10 to-transparent rounded-full pointer-events-none"></div>
+                )}
+                <span className="relative z-10 hidden md:inline">{item.name}</span>
+                <span className="relative z-10 md:hidden">
+                  {Icon ? <Icon size={18} strokeWidth={2.5} className="text-current" /> : null}
               </span>
               {isActive && (
                 <motion.div
                   layoutId="lamp"
-                  className="absolute inset-0 w-full rounded-full -z-10"
-                  style={{
-                    background: '#3C3E3E',
-                    opacity: 0.85,
-                  }}
+                    className="absolute inset-0 w-full rounded-full -z-10"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.25), rgba(255, 255, 255, 0.15))',
+                      backdropFilter: 'blur(12px)',
+                    }}
                   initial={false}
                   transition={{
                     type: "spring",
@@ -102,22 +112,26 @@ export function NavBar({ items, className }: NavBarProps) {
                     damping: 30,
                   }}
                 >
-                  <div
-                    className="absolute -top-2 left-1/2 -translate-x-1/2 w-8 h-1 rounded-t-full"
-                    style={{ background: '#3C3E3E', opacity: 1 }}
-                  >
-                    <div className="absolute w-12 h-6 rounded-full blur-md -top-2 -left-2"
-                      style={{ background: '#3C3E3E', opacity: 0.7 }} />
-                    <div className="absolute w-8 h-6 rounded-full blur-md -top-1"
-                      style={{ background: '#3C3E3E', opacity: 0.7 }} />
-                    <div className="absolute w-4 h-4 rounded-full blur-sm top-0 left-2"
-                      style={{ background: '#3C3E3E', opacity: 0.5 }} />
+                    <div
+                      className="absolute -top-2 left-1/2 -translate-x-1/2 w-8 h-1 rounded-t-full"
+                      style={{ 
+                        background: 'linear-gradient(135deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.3))',
+                        backdropFilter: 'blur(8px)',
+                      }}
+                    >
+                      <div className="absolute w-12 h-6 rounded-full blur-md -top-2 -left-2"
+                        style={{ background: 'rgba(255, 255, 255, 0.3)', opacity: 0.7 }} />
+                      <div className="absolute w-8 h-6 rounded-full blur-md -top-1"
+                        style={{ background: 'rgba(255, 255, 255, 0.25)', opacity: 0.7 }} />
+                      <div className="absolute w-4 h-4 rounded-full blur-sm top-0 left-2"
+                        style={{ background: 'rgba(255, 255, 255, 0.3)', opacity: 0.6 }} />
                   </div>
                 </motion.div>
               )}
             </Link>
-          );
+            );
         })}
+        </div>
       </div>
     </div>
   );

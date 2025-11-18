@@ -5,7 +5,7 @@ import { getWebTorrentClient } from '@/lib/torrent';
 import createTorrent from 'create-torrent';
 import { getContracts } from '@/lib/web3';
 import { useImageUpload } from '@/hooks/use-image-upload';
-import { ImagePlus, Upload, FileText, Loader2 } from 'lucide-react';
+import { ImagePlus, Upload, FileText, Loader2, Copy, Check, ExternalLink } from 'lucide-react';
 import { v4 as uuidv4 } from "uuid";
 import { supabase } from '@/lib/supabase/client';
 import { Buffer } from 'buffer';
@@ -28,18 +28,35 @@ function formatBytes(bytes: number): string {
 // Helper to upload .torrent file to Supabase Storage and return public URL (with user session)
 async function uploadTorrentToSupabaseStorage(file: File, userId: string) {
   // Ensure user is logged in and session is available
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) throw new Error("No active user session for upload");
-  // Use the singleton supabase client (which maintains the session)
-  const fileExt = ".torrent";
-  const fileName = `${userId}/${uuidv4()}${fileExt}`;
-  const { data, error } = await supabase.storage
-    .from("torrents")
-    .upload(fileName, file, { upsert: false });
-  if (error) throw error;
-  // Get public URL
-  const { data: publicUrlData } = supabase.storage.from("torrents").getPublicUrl(fileName);
-  return publicUrlData.publicUrl;
+  try {
+    const { data: { session }, error } = await supabase.auth.getSession();
+    
+    // Handle refresh token errors gracefully
+    if (error) {
+      if (error.message?.includes('Refresh Token') || error.message?.includes('refresh_token')) {
+        console.log('Invalid refresh token detected during upload, clearing session');
+        await supabase.auth.signOut();
+        throw new Error("Session expired. Please sign in again.");
+      }
+      throw new Error(`Authentication error: ${error.message}`);
+    }
+    
+    if (!session) throw new Error("No active user session for upload");
+    
+    // Use the singleton supabase client (which maintains the session)
+    const fileExt = ".torrent";
+    const fileName = `${userId}/${uuidv4()}${fileExt}`;
+    const { data, error: uploadError } = await supabase.storage
+      .from("torrents")
+      .upload(fileName, file, { upsert: false });
+    if (uploadError) throw uploadError;
+    // Get public URL
+    const { data: publicUrlData } = supabase.storage.from("torrents").getPublicUrl(fileName);
+    return publicUrlData.publicUrl;
+  } catch (err: any) {
+    // Re-throw the error so it can be handled by the caller
+    throw err;
+  }
 }
 
 // Replace with actual deployed addresses and ABIs
@@ -71,6 +88,10 @@ export default function SharePage() {
   const { showToast } = useToast();
   const wallet = useWallet();
   const [isRegistering, setIsRegistering] = useState(false);
+  const [txHash, setTxHash] = useState<string | null>(null);
+  const [contractAddress, setContractAddress] = useState<string | null>(null);
+  const [copiedTxHash, setCopiedTxHash] = useState(false);
+  const [copiedContractAddress, setCopiedContractAddress] = useState(false);
   
   // Real-time peer stats polling for all seeding torrents
   useEffect(() => {
@@ -347,6 +368,10 @@ export default function SharePage() {
   // Restore seeding torrents from localStorage and active client torrents on mount
   useEffect(() => {
     const restoreSeedingTorrents = async () => {
+      // Note: We restore seeding regardless of wallet connection status
+      // because these are already registered torrents that were previously seeding.
+      // The wallet requirement only applies to NEW seeding operations.
+      
       try {
         const client = await getWebTorrentClient();
         
@@ -1476,11 +1501,19 @@ export default function SharePage() {
     
     console.log('🔄 Starting seeding torrent restoration on page mount...');
     restoreSeedingTorrents();
-  }, []);
+  }, []); // Run once on mount - don't depend on wallet connection for restoration
 
   const handleCreate = async () => {
     if (files.length === 0) return;
-    setStatus('Creating torrent...');
+    
+    // Check wallet connection first
+    if (!wallet.isConnected || !wallet.address) {
+      setStatus('Please connect your wallet to share files.');
+      showToast('Wallet connection required. Please connect your MetaMask wallet to share files.', 'warning');
+      return;
+    }
+    
+    setStatus('Preparing file registration...');
     // Get current userId from Supabase
     const { user, error } = await AuthService.getCurrentUser();
     if (!user || error) {
@@ -1540,27 +1573,8 @@ export default function SharePage() {
         setTorrentFileUrl(null);
         return;
       }
-      // Ensure the Blob is the .torrent file, not the original file
-      const uint8 = Uint8Array.from(torrentBuf as any);
-      const torrentBlob = new Blob([uint8], { type: 'application/x-bittorrent' });
-      const torrentFileSaveName = files.length === 1 
-        ? `${files[0].name}.torrent` 
-        : `${torrentName}.torrent`;
-      const torrentFileObj = new File([torrentBlob], torrentFileSaveName, { type: "application/x-bittorrent" });
-      
-      // Upload .torrent file to Supabase Storage
-      let publicTorrentUrl: string | null = null;
-      try {
-        publicTorrentUrl = await uploadTorrentToSupabaseStorage(torrentFileObj, userId);
-      } catch (e) {
-        console.error("Failed to upload .torrent to Supabase Storage", e);
-        alert("Failed to upload .torrent file. Please try again.");
-        return;
-      }
-      setTorrentFileUrl(publicTorrentUrl);
-      
-      // Generate magnet link from torrent file (without seeding)
-      // Parse the torrent buffer to extract infoHash
+      // Parse the torrent buffer to extract infoHash FIRST (before uploading/seeding)
+      // We need infoHash to register on blockchain
       let parsed: any;
       try {
         // @ts-ignore
@@ -1611,8 +1625,7 @@ export default function SharePage() {
             parsed: `${parsedTotalSize} bytes`,
             difference: `${Math.abs(originalTotalSize - parsedTotalSize)} bytes`
           });
-          setStatus(`Warning: File size mismatch detected. Original: ${(originalTotalSize / 1024).toFixed(2)} KB, Torrent: ${(parsedTotalSize / 1024).toFixed(2)} KB`);
-          showToast('File size mismatch detected', 'warning');
+          // File size mismatch warning removed per user request
         }
         console.log('Full parsed torrent object:', parsed);
       } catch (parseErr) {
@@ -1642,93 +1655,137 @@ export default function SharePage() {
       const trackers = DEFAULT_TRACKERS.map(t => `tr=${encodeURIComponent(t)}`).join('&');
       const magnetURI = `magnet:?xt=urn:btih:${infoHash}&dn=${encodeURIComponent(torrentFileName)}&${trackers}`;
       
-      setMagnet(magnetURI);
       const fileCountText = files.length === 1 ? 'file' : `${files.length} files`;
       
-      // Register file on blockchain if wallet is connected
-      if (wallet.isConnected && wallet.address) {
-        try {
-          setIsRegistering(true);
-          setStatus('Registering file on blockchain...');
-          const fileNameToRegister = name && name.trim() ? name : (files.length === 1 
-            ? (files[0].name ? files[0].name.replace(/\.[^/.]+$/, '') : 'file')
-            : torrentName);
-          
-          // Use infoHash as contentHash
-          const contentHash = infoHash;
-          
-          const registrationResult = await registerFileOnChain(
-            fileNameToRegister,
-            magnetURI,
-            contentHash
-          );
-          
-          console.log('✅ File registered on blockchain:', registrationResult);
-          setStatus(`File registered on-chain! TX: ${registrationResult.txHash.substring(0, 10)}...`);
-          showToast('File successfully registered on blockchain', 'success');
-        } catch (error: any) {
-          // Handle contract not configured error gracefully
-          if (error.message?.includes('contract address not configured') || 
-              error.message?.includes('NEXT_PUBLIC_REGISTRY_ADDRESS')) {
-            console.info('Blockchain contracts not configured - torrent created successfully without on-chain registration');
-            showToast('Torrent created! Blockchain registration skipped (contracts not configured). See BLOCKCHAIN_SETUP.md to enable.', 'info');
-            setStatus('Torrent created (blockchain registration skipped - contracts not configured)');
-          } else if (error.message?.includes('Wrong network') || error.message?.includes('switch to Sepolia')) {
-            console.warn('Wrong network detected - user needs to switch to Sepolia');
-            setStatus('Please switch to Sepolia testnet in MetaMask to register on blockchain');
-            showToast('Wrong network! Please switch to Sepolia testnet (Chain ID: 11155111) in MetaMask to register files on blockchain.', 'warning');
-            // Try to switch network automatically
-            try {
-              if (typeof window !== 'undefined' && (window as any).ethereum) {
-                await (window as any).ethereum.request({
-                  method: 'wallet_switchEthereumChain',
-                  params: [{ chainId: '0xaa36a7' }], // Sepolia chain ID in hex
-                });
-                showToast('Switched to Sepolia! Please try registering again.', 'success');
-              }
-            } catch (switchError: any) {
-              // If Sepolia network is not added, try to add it
-              if (switchError.code === 4902) {
-                try {
-                  await (window as any).ethereum.request({
-                    method: 'wallet_addEthereumChain',
-                    params: [{
-                      chainId: '0xaa36a7',
-                      chainName: 'Sepolia',
-                      nativeCurrency: {
-                        name: 'ETH',
-                        symbol: 'ETH',
-                        decimals: 18
-                      },
-                      rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
-                      blockExplorerUrls: ['https://sepolia.etherscan.io']
-                    }]
-                  });
-                  showToast('Sepolia network added! Please try registering again.', 'success');
-                } catch (addError) {
-                  console.error('Failed to add Sepolia network:', addError);
-                }
-              } else if (switchError.code === 4001) {
-                showToast('Network switch cancelled. Please switch to Sepolia manually in MetaMask.', 'warning');
-              }
+      // Register file on blockchain FIRST (REQUIRED - no upload/seeding until this succeeds)
+      let registrationResult: any = null;
+      try {
+        setIsRegistering(true);
+        setStatus('Registering file on blockchain...');
+        const fileNameToRegister = name && name.trim() ? name : (files.length === 1 
+          ? (files[0].name ? files[0].name.replace(/\.[^/.]+$/, '') : 'file')
+          : torrentName);
+        
+        // Use infoHash as contentHash
+        const contentHash = infoHash;
+        
+        registrationResult = await registerFileOnChain(
+          fileNameToRegister,
+          magnetURI,
+          contentHash
+        );
+        
+        console.log('✅ File registered on blockchain:', registrationResult);
+        const txHashValue = registrationResult.txHash;
+        const contractAddr = process.env.NEXT_PUBLIC_REGISTRY_ADDRESS || '';
+        setTxHash(txHashValue);
+        setContractAddress(contractAddr);
+        const etherscanUrl = `https://sepolia.etherscan.io/tx/${txHashValue}`;
+        setStatus(`File registered on-chain! TX: ${txHashValue.substring(0, 10)}...`);
+        showToast(
+          `File successfully registered on blockchain! View on Etherscan: ${txHashValue.substring(0, 10)}...`,
+          'success'
+        );
+        console.log('🔗 View transaction on Etherscan:', etherscanUrl);
+        console.log('📋 Contract address:', contractAddr);
+      } catch (error: any) {
+        setIsRegistering(false);
+        console.error('❌ Blockchain registration error:', error);
+        console.error('Error code:', error.code);
+        console.error('Error message:', error.message);
+        console.error('Error data:', error.data);
+        console.error('Full error:', JSON.stringify(error, null, 2));
+        
+        // Handle contract not configured error
+        if (error.message?.includes('contract address not configured') || 
+            error.message?.includes('NEXT_PUBLIC_REGISTRY_ADDRESS')) {
+          setStatus('Blockchain contracts not configured. Cannot share files without blockchain registration.');
+          showToast('Blockchain contracts not configured. Please configure contracts to share files.', 'error');
+          return; // Stop here - don't proceed without registration
+        } else if (error.message?.includes('Wrong network') || error.message?.includes('switch to Sepolia')) {
+          console.warn('Wrong network detected - user needs to switch to Sepolia');
+          setStatus('Please switch to Sepolia testnet in MetaMask to register on blockchain');
+          showToast('Wrong network! Please switch to Sepolia testnet (Chain ID: 11155111) in MetaMask to register files on blockchain.', 'warning');
+          // Try to switch network automatically
+          try {
+            if (typeof window !== 'undefined' && (window as any).ethereum) {
+              await (window as any).ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: '0xaa36a7' }], // Sepolia chain ID in hex
+              });
+              showToast('Switched to Sepolia! Please try again.', 'success');
             }
-          } else if (error.message?.includes('already registered')) {
-            setStatus('File already registered on-chain');
-            showToast('File already registered on blockchain', 'info');
-          } else if (error.message?.includes('user rejected') || error.code === 4001) {
-            setStatus('Blockchain registration cancelled');
-            showToast('Blockchain registration cancelled', 'warning');
-          } else {
-            console.error('Failed to register file on blockchain:', error);
-            setStatus('Failed to register on blockchain (torrent still created)');
-            showToast('Failed to register on blockchain (torrent still works)', 'warning');
+          } catch (switchError: any) {
+            // If Sepolia network is not added, try to add it
+            if (switchError.code === 4902) {
+              try {
+                await (window as any).ethereum.request({
+                  method: 'wallet_addEthereumChain',
+                  params: [{
+                    chainId: '0xaa36a7',
+                    chainName: 'Sepolia',
+                    nativeCurrency: {
+                      name: 'ETH',
+                      symbol: 'ETH',
+                      decimals: 18
+                    },
+                    rpcUrls: ['https://ethereum-sepolia-rpc.publicnode.com'],
+                    blockExplorerUrls: ['https://sepolia.etherscan.io']
+                  }]
+                });
+                showToast('Sepolia network added! Please try again.', 'success');
+              } catch (addError) {
+                console.error('Failed to add Sepolia network:', addError);
+              }
+            } else if (switchError.code === 4001) {
+              showToast('Network switch cancelled. Please switch to Sepolia manually in MetaMask.', 'warning');
+            }
           }
-        } finally {
-          setIsRegistering(false);
+          return; // Stop here - don't proceed without registration
+        } else if (error.message?.includes('user rejected') || error.code === 4001 || error.code === 'ACTION_REJECTED') {
+          setStatus('Blockchain registration cancelled. Cannot share files without registration.');
+          showToast('Blockchain registration cancelled. Please approve the transaction to share files.', 'warning');
+          return; // Stop here - don't proceed without registration
+        } else if (error.message?.includes('Transaction failed') || error.message?.includes('reverted')) {
+          setStatus('Transaction failed or reverted. Check console for details.');
+          showToast(`Transaction failed: ${error.message}`, 'error');
+          return; // Stop here - don't proceed without registration
+        } else {
+          console.error('Failed to register file on blockchain:', error);
+          const errorMsg = error.message || error.reason || 'Unknown error';
+          setStatus(`Failed to register on blockchain: ${errorMsg}`);
+          showToast(`Failed to register on blockchain: ${errorMsg}`, 'error');
+          return; // Stop here - don't proceed without registration
         }
-      } else {
-        console.log('Wallet not connected - skipping blockchain registration');
+      } finally {
+        setIsRegistering(false);
       }
+      
+      // Only proceed with upload and seeding if blockchain registration succeeded
+      if (!registrationResult) {
+        return; // Should not reach here, but safety check
+      }
+      
+      // Now upload .torrent file to Supabase Storage (after successful registration)
+      setStatus('Uploading torrent file...');
+      const uint8 = Uint8Array.from(torrentBuf as any);
+      const torrentBlob = new Blob([uint8], { type: 'application/x-bittorrent' });
+      const torrentFileSaveName = files.length === 1 
+        ? `${files[0].name}.torrent` 
+        : `${torrentName}.torrent`;
+      const torrentFileObj = new File([torrentBlob], torrentFileSaveName, { type: "application/x-bittorrent" });
+      
+      let publicTorrentUrl: string | null = null;
+      try {
+        publicTorrentUrl = await uploadTorrentToSupabaseStorage(torrentFileObj, userId);
+      } catch (e) {
+        console.error("Failed to upload .torrent to Supabase Storage", e);
+        setStatus('Failed to upload .torrent file. File is registered on blockchain but upload failed.');
+        showToast('Failed to upload .torrent file. Please try again.', 'error');
+        return;
+      }
+      setTorrentFileUrl(publicTorrentUrl);
+      setMagnet(magnetURI);
       
       // Save to MongoDB via API
       try {
@@ -2326,6 +2383,13 @@ export default function SharePage() {
 
   // Handle seeding a torrent file - moved from profile page
   async function handleSeed() {
+    // Check wallet connection first
+    if (!wallet.isConnected || !wallet.address) {
+      setSeedingStatus("Please connect your wallet to seed files.");
+      showToast('Wallet connection required. Please connect your MetaMask wallet to seed files.', 'warning');
+      return;
+    }
+    
     setSeedingStatus("Seeding...");
     setDuplicateMessage(""); // Clear previous duplicate messages
     try {
@@ -2545,29 +2609,32 @@ export default function SharePage() {
   }, [statsUpdateCounter]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black">
-      <div className="mx-auto max-w-3xl px-4 py-10">
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 backdrop-blur">
+    <div className="min-h-screen relative pt-20">
+      <div className="mx-auto max-w-3xl px-4 py-10 relative z-10">
+        <div className="rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-[#CC2E28]/10 relative overflow-hidden">
+          {/* Glass reflection effect */}
+          <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+          <div className="relative">
           <div className="mb-4">
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-white text-xl font-semibold">Share a file</div>
-                <div className="text-sm text-zinc-400">Create a torrent and register on-chain</div>
+                <div className="text-sm text-white/60">Create a torrent and register on-chain</div>
               </div>
               <WalletConnect />
             </div>
             {!wallet.isConnected && (
-              <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
-                Connect your wallet to register files on the blockchain and earn points
+              <div className="mt-2 rounded-xl border border-yellow-400/30 bg-yellow-500/10 backdrop-blur-md px-4 py-3 text-yellow-200 text-sm font-medium shadow-lg shadow-yellow-500/10">
+                ⚠️ Wallet connection required. Please connect your MetaMask wallet to share files.
               </div>
             )}
           </div>
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm text-zinc-300">File name (optional)</label>
+              <label className="text-sm text-white/80">File name (optional)</label>
               <input
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200 placeholder:text-zinc-500"
+                className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-white/30 transition-all"
                 placeholder="My Document.pdf"
                 value={name}
                 onChange={e => setName(e.target.value)}
@@ -2576,14 +2643,25 @@ export default function SharePage() {
 
             {files.length === 0 ? (
               <div
-                tabIndex={0}
+                tabIndex={wallet.isConnected ? 0 : -1}
                 role="button"
                 aria-label="File upload area"
-                onClick={() => fileInputRef.current?.click()}
-                onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click(); }}
-                onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                onClick={() => {
+                  if (wallet.isConnected) {
+                    fileInputRef.current?.click();
+                  } else {
+                    showToast('Please connect your wallet first', 'warning');
+                  }
+                }}
+                onKeyDown={e => { if (wallet.isConnected && (e.key === 'Enter' || e.key === ' ')) fileInputRef.current?.click(); }}
+                onDragOver={e => { if (wallet.isConnected) { e.preventDefault(); setIsDragging(true); } }}
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={e => {
+                  if (!wallet.isConnected) {
+                    e.preventDefault();
+                    showToast('Please connect your wallet first', 'warning');
+                    return;
+                  }
                   e.preventDefault();
                   setIsDragging(false);
                   const droppedFiles = Array.from(e.dataTransfer.files || []);
@@ -2633,17 +2711,17 @@ export default function SharePage() {
                     }
                   }
                 }}
-                className={`relative rounded-xl border border-dashed ${isDragging ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-zinc-700 bg-zinc-950/60'} p-8 text-center cursor-pointer hover:bg-zinc-900/60 w-full`}
+                className={`relative rounded-2xl border border-dashed ${!wallet.isConnected ? 'opacity-50 cursor-not-allowed' : isDragging ? 'border-cyan-500/60 bg-cyan-500/10 backdrop-blur-md' : 'border-white/20 bg-white/5 backdrop-blur-xl'} p-8 text-center ${wallet.isConnected ? 'cursor-pointer hover:bg-white/10 hover:border-white/30' : ''} transition-all duration-300 shadow-lg shadow-black/10 w-full`}
                 style={{ outline: 'none', minHeight: '220px' }}
               >
                 {/* Icon/text overlay statically placed at the top inside the upload area */}
                 {!dropPreview && (
                   <div className="flex flex-col items-center gap-3 pb-4">
-                    <div className="h-12 w-12 grid place-items-center rounded-full bg-zinc-800/60 text-zinc-300 mx-auto">
+                    <div className="h-12 w-12 grid place-items-center rounded-full bg-white/10 backdrop-blur-md border border-white/20 text-white/80 mx-auto">
                       <ImagePlus size={22} />
                     </div>
-                    <div className="text-zinc-200 font-medium">Click to select</div>
-                    <div className="text-xs text-zinc-500">or drag and drop files or folders here</div>
+                    <div className="text-white/90 font-medium">Click to select</div>
+                    <div className="text-xs text-white/60">or drag and drop files or folders here</div>
                   </div>
                 )}
                 {/* File preview (if present) */}
@@ -2704,7 +2782,7 @@ export default function SharePage() {
                 />
               </div>
             ) : (
-              <div className="relative rounded-xl border border-zinc-700 bg-zinc-950/60 p-8">
+              <div className="relative rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-lg shadow-black/10">
                 <div className="flex flex-col items-center gap-6">
                   {/* Folder Component */}
                   <Folder
@@ -2712,8 +2790,8 @@ export default function SharePage() {
                     size={1.2}
                     items={files.slice(0, 3).map((file, index) => (
                       <div key={index} className="flex flex-col items-center justify-center h-full p-2">
-                        <FileText className="text-zinc-700 mb-1" size={24} />
-                        <span className="text-[10px] text-zinc-600 text-center px-1 truncate w-full">
+                        <FileText className="text-white/70 mb-1" size={24} />
+                        <span className="text-[10px] text-white/80 text-center px-1 truncate w-full">
                           {file.name.length > 15 ? `${file.name.substring(0, 12)}...` : file.name}
                         </span>
                       </div>
@@ -2723,7 +2801,7 @@ export default function SharePage() {
                   
                   {/* File info */}
                   <div className="text-center space-y-2 w-full">
-                    <div className="text-zinc-200 font-medium">
+                    <div className="text-white/90 font-medium">
                       {files.length === 1 ? (
                         name || files[0].name
                       ) : (
@@ -2731,14 +2809,14 @@ export default function SharePage() {
                       )}
                     </div>
                     {files.length > 1 && (
-                      <div className="text-xs text-zinc-400 max-h-32 overflow-y-auto space-y-1">
+                      <div className="text-xs text-white/70 max-h-32 overflow-y-auto space-y-1">
                         {files.slice(0, 5).map((f, i) => (
-                          <div key={i} className="text-xs text-zinc-500 truncate">
+                          <div key={i} className="text-xs text-white/60 truncate">
                             • {f.webkitRelativePath || f.name} ({formatBytes(f.size)})
                           </div>
                         ))}
                         {files.length > 5 && (
-                          <div className="text-xs text-zinc-500">
+                          <div className="text-xs text-white/60">
                             ... and {files.length - 5} more file{files.length - 5 > 1 ? 's' : ''}
                           </div>
                         )}
@@ -2821,45 +2899,149 @@ export default function SharePage() {
 
             <div className="pt-2">
               <button
-                className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-4 py-2 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
                 onClick={handleCreate}
-                disabled={files.length === 0 || isRegistering}
+                disabled={files.length === 0 || isRegistering || !wallet.isConnected}
               >
                 {isRegistering ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Registering on blockchain...
                   </>
+                ) : !wallet.isConnected ? (
+                  'Connect wallet to share files'
                 ) : files.length === 0 ? (
                   'Select files or folder to continue'
                 ) : files.length === 1 ? (
-                  wallet.isConnected ? 'Create & Register' : 'Create Torrent'
+                  'Create & Register'
                 ) : (
-                  wallet.isConnected 
-                    ? `Create & Register (${files.length} files)`
-                    : `Create Torrent (${files.length} files)`
+                  `Create & Register (${files.length} files)`
                 )}
               </button>
             </div>
 
             {status && !status.includes('❌') && !status.includes('⚠️') && !status.includes('Failed') && !status.includes('Faulty') && !status.includes('Warning') && !status.includes('created') && (
-              <div className="text-sm text-zinc-300">{status}</div>
+              <div className="text-sm text-white/80">{status}</div>
+            )}
+
+            {/* Transaction Details Section */}
+            {txHash && (
+              <div className="space-y-3 rounded-2xl border border-white/20 bg-white/10 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                {/* Glass reflection */}
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
+                  <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                    <ExternalLink className="w-4 h-4" />
+                    Blockchain Registration Details
+                  </h3>
+                  
+                  {/* Transaction Hash */}
+                  <div className="space-y-1 mb-3">
+                    <label className="text-xs uppercase tracking-wide text-white/60">Transaction Hash</label>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 rounded-xl border border-white/20 bg-white/5 backdrop-blur-md px-3 py-2 text-sm font-mono text-white/90 break-all">
+                        {txHash}
+                      </div>
+                      <button
+                        className="flex items-center gap-1.5 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-3 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-200 shadow-lg shadow-white/10"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(txHash);
+                            setCopiedTxHash(true);
+                            showToast('Transaction hash copied to clipboard!', 'success');
+                            setTimeout(() => setCopiedTxHash(false), 2000);
+                          } catch (err) {
+                            showToast('Failed to copy transaction hash', 'error');
+                          }
+                        }}
+                      >
+                        {copiedTxHash ? (
+                          <>
+                            <Check className="w-4 h-4" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4" />
+                            Copy
+                          </>
+                        )}
+                      </button>
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1.5 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-3 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-200 shadow-lg shadow-white/10"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        View
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Contract Address */}
+                  {contractAddress && (
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wide text-white/60">Contract Address</label>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 rounded-xl border border-white/20 bg-white/5 backdrop-blur-md px-3 py-2 text-sm font-mono text-white/90 break-all">
+                          {contractAddress}
+                        </div>
+                        <button
+                          className="flex items-center gap-1.5 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-3 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-200 shadow-lg shadow-white/10"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(contractAddress);
+                              setCopiedContractAddress(true);
+                              showToast('Contract address copied to clipboard!', 'success');
+                              setTimeout(() => setCopiedContractAddress(false), 2000);
+                            } catch (err) {
+                              showToast('Failed to copy contract address', 'error');
+                            }
+                          }}
+                        >
+                          {copiedContractAddress ? (
+                            <>
+                              <Check className="w-4 h-4" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-4 h-4" />
+                              Copy
+                            </>
+                          )}
+                        </button>
+                        <a
+                          href={`https://sepolia.etherscan.io/address/${contractAddress}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-3 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-200 shadow-lg shadow-white/10"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          View
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
 
             {(magnet || torrentFileUrl) && (
               <div className="space-y-2">
                 {magnet && (
                   <>
-                    <label className="text-sm text-zinc-300">Magnet URI</label>
+                    <label className="text-sm text-white/80">Magnet URI</label>
                     <textarea
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-3 py-2 text-zinc-200"
+                      className="w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2.5 text-white/90 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-white/30 transition-all"
                       rows={3}
                       readOnly
                       value={magnet}
                     />
                     <div>
                       <button
-                        className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10"
                         onClick={() => navigator.clipboard.writeText(magnet)}
                       >
                         Copy magnet link
@@ -2871,7 +3053,7 @@ export default function SharePage() {
                   <div>
                     <button
                       type="button"
-                      className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs text-zinc-200 ring-1 ring-inset ring-zinc-700 hover:bg-zinc-800"
+                      className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-4 py-2 text-sm font-medium text-white/90 hover:bg-white/20 hover:border-white/30 transition-all duration-300 shadow-lg shadow-black/20"
                       onClick={async () => {
                         try {
                           const res = await fetch(torrentFileUrl);
@@ -2912,13 +3094,17 @@ export default function SharePage() {
               </div>
             )}
           </div>
+          </div>
         </div>
         
         {/* Seeding Section - moved from profile page */}
-        <div className="mt-8 rounded-2xl border-2 border-emerald-600/50 bg-zinc-900/40 p-6 backdrop-blur">
+        <div className="mt-8 rounded-3xl border border-white/10 bg-white/5 backdrop-blur-2xl p-6 shadow-2xl shadow-[#CC2E28]/10 relative overflow-hidden">
+          {/* Glass reflection effect */}
+          <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+          <div className="relative">
           <div className="mb-4">
             <div className="text-white text-xl font-semibold">Seed Files</div>
-            <div className="text-sm text-zinc-400">Upload files to seed them immediately, or add magnet links/.torrent files</div>
+            <div className="text-sm text-white/60">Upload files to seed them immediately, or add magnet links/.torrent files</div>
           </div>
           
           {/* Connection health indicator */}
@@ -2926,18 +3112,18 @@ export default function SharePage() {
             const totalPeers = Object.values(peerStats).reduce((sum, stats) => sum + stats.peers, 0);
             const hasConnection = totalPeers > 0;
             return (
-              <div className={`rounded-xl border p-4 mb-4 ${
+              <div className={`rounded-xl border backdrop-blur-md p-4 mb-4 shadow-lg ${
                 hasConnection 
-                  ? 'border-green-500/50 bg-green-500/5' 
-                  : 'border-yellow-500/50 bg-yellow-500/5'
+                  ? 'border-green-500/30 bg-green-500/10 shadow-green-500/10' 
+                  : 'border-yellow-500/30 bg-yellow-500/10 shadow-yellow-500/10'
               }`}>
                 <div className="flex items-center gap-3">
                   <div className={`w-2 h-2 rounded-full ${hasConnection ? 'bg-green-400 animate-pulse' : 'bg-yellow-400'}`}></div>
                   <div className="flex-1">
-                    <div className="text-sm font-medium text-zinc-100">
+                    <div className="text-sm font-medium text-white/90">
                       {hasConnection ? 'Connected to peers' : 'No peers yet'}
                     </div>
-                    <div className="text-xs text-zinc-400 mt-0.5">
+                    <div className="text-xs text-white/70 mt-0.5">
                       {hasConnection 
                         ? `${totalPeers} peer${totalPeers === 1 ? '' : 's'} connected - You're helping others download files!`
                         : 'Searching for peers... This may take up to 30 seconds.'
@@ -2952,12 +3138,17 @@ export default function SharePage() {
           {/* Current seeding stats */}
           {seedingTorrents.length > 0 && (
             <div className="grid gap-4 sm:grid-cols-4 mb-6">
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-                <div className="text-xs text-zinc-400 mb-1">Active Torrents</div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
+                <div className="text-xs text-white/60 mb-1">Active Torrents</div>
                 <div className="text-2xl font-bold text-cyan-400">{seedingTorrents.length}</div>
+                </div>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-                <div className="text-xs text-zinc-400 mb-1">Total Size</div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
+                <div className="text-xs text-white/60 mb-1">Total Size</div>
                 <div className="text-2xl font-bold text-cyan-400">
                   {(() => {
                     // Calculate total size from all seeding torrents
@@ -2972,15 +3163,21 @@ export default function SharePage() {
                     return formatBytes(totalBytes);
                   })()}
                 </div>
+                </div>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-                <div className="text-xs text-zinc-400 mb-1">Connected Peers</div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
+                <div className="text-xs text-white/60 mb-1">Connected Peers</div>
                 <div className="text-2xl font-bold text-green-400">
                   {Object.values(peerStats).reduce((sum, stats) => sum + stats.peers, 0)}
                 </div>
+                </div>
               </div>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
-                <div className="text-xs text-zinc-400 mb-1">Connection Status</div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-4 shadow-lg shadow-black/10 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
+                <div className="text-xs text-white/60 mb-1">Connection Status</div>
                 <div className="text-2xl font-bold">
                   {Object.values(peerStats).some(stats => stats.peers > 0) ? (
                     <span className="text-green-400 flex items-center gap-2">
@@ -2994,13 +3191,14 @@ export default function SharePage() {
                     </span>
                   )}
                 </div>
+                </div>
               </div>
             </div>
           )}
 
           {/* .torrent file upload (downloads first, then seeds) */}
           <div className="mb-4">
-            <label className="block text-sm text-zinc-300 mb-2">
+            <label className="block text-sm text-white/80 mb-2">
               Torrent Files (.torrent)
               <span className="ml-2 text-xs text-yellow-400">⚠️ Downloads first</span>
             </label>
@@ -3009,13 +3207,13 @@ export default function SharePage() {
               accept=".torrent"
               multiple
               onChange={e => setSeedingFiles(Array.from(e.target.files || []))}
-              className="block text-sm text-zinc-200 w-full"
+              className="block text-sm text-white/90 w-full rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-white/30 focus:border-white/30 transition-all"
             />
-            <p className="text-xs text-zinc-500 mt-1">Upload .torrent metadata files. Files will be downloaded first, then seeded.</p>
+            <p className="text-xs text-white/60 mt-1">Upload .torrent metadata files. Files will be downloaded first, then seeded.</p>
             {seedingFiles.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {seedingFiles.map((f, i) => (
-                  <span key={i} className="inline-flex items-center gap-2 rounded-md bg-zinc-800 px-2 py-1 text-xs text-zinc-200">
+                  <span key={i} className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 backdrop-blur-md px-3 py-1.5 text-xs text-white/90 shadow-lg shadow-black/10">
                     {f.name}
                   </span>
                 ))}
@@ -3026,12 +3224,12 @@ export default function SharePage() {
           {/* Start seeding button */}
           <div className="flex gap-2">
             <button
-              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-500 to-indigo-600 px-6 py-3 text-sm font-medium text-white hover:from-cyan-600 hover:to-indigo-700 disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-6 py-3 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10 disabled:opacity-60 disabled:cursor-not-allowed"
               onClick={handleSeed}
-              disabled={seedingFiles.length === 0}
+              disabled={seedingFiles.length === 0 || !wallet.isConnected}
             >
               <Upload className="h-4 w-4" />
-              Start Seeding
+              {!wallet.isConnected ? 'Connect wallet to seed' : 'Start Seeding'}
             </button>
             {seedingFiles.length > 0 && (
               <button
@@ -3039,7 +3237,7 @@ export default function SharePage() {
                   setSeedingFiles([]);
                   setSeedingStatus("");
                 }}
-                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
+                className="rounded-xl border border-white/30 bg-white/20 backdrop-blur-md px-4 py-2.5 text-sm font-medium text-white hover:bg-white/30 hover:border-white/40 transition-all duration-300 shadow-lg shadow-white/10"
               >
                 Clear All
               </button>
@@ -3074,10 +3272,13 @@ export default function SharePage() {
             if (freshTorrents.length === 0) return null;
             
             return (
-              <div key={`seeding-list-${statsUpdateCounter}`} className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/60 p-6">
+              <div key={`seeding-list-${statsUpdateCounter}`} className="mt-6 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-6 shadow-lg shadow-black/10 relative overflow-hidden">
+                {/* Glass reflection effect */}
+                <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-transparent pointer-events-none"></div>
+                <div className="relative">
                 {/* Force React to detect statsUpdateCounter changes */}
                 <div style={{ display: 'none' }} data-update-counter={statsUpdateCounter} />
-                <h3 className="text-lg font-semibold text-zinc-100 mb-4">Currently Seeding</h3>
+                <h3 className="text-lg font-semibold text-white mb-4">Currently Seeding</h3>
                 <div className="space-y-2">
                   {freshTorrents.map((t, i) => {
                   // Safely extract infoHash - handle both Buffer and string formats
@@ -3429,7 +3630,7 @@ export default function SharePage() {
                             setSeedingTorrents(seedingTorrents.filter((_, idx) => idx !== i));
                           }
                         }}
-                        className="rounded-lg bg-red-500/10 px-3 py-1.5 text-xs text-red-400 ring-1 ring-inset ring-red-500/30 hover:bg-red-500/15"
+                        className="rounded-xl border border-red-400/40 bg-red-500/20 backdrop-blur-md px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-500/30 hover:border-red-400/50 transition-all duration-200 shadow-lg shadow-red-500/20"
                       >
                         Stop
                       </button>
@@ -3437,9 +3638,11 @@ export default function SharePage() {
                   );
                 })}
               </div>
-            </div>
+                </div>
+              </div>
             );
           }, [seedingTorrents, statsUpdateCounter, peerStats])}
+          </div>
         </div>
       </div>
     </div>

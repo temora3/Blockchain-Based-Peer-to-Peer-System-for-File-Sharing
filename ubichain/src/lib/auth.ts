@@ -51,8 +51,14 @@ export class AuthService {
           id: userId,
           full_name: fullName,
           email,
+          role: 'user', // Default role for new users
         });
         console.log('Profile upsert result (signUp):', { upsertError, upsertData });
+        
+        // If role column doesn't exist, try to add it via RPC (if available) or log a warning
+        if (upsertError?.message?.includes('column') && upsertError?.message?.includes('role')) {
+          console.warn('Role column may not exist in profiles table. Please add it manually or run migration.');
+        }
       }
 
       if (data.user && !data.user.email_confirmed_at) {
@@ -144,8 +150,16 @@ export class AuthService {
           id: userId,
           full_name: fullName,
           email,
+          role: 'user', // Ensure role is set to 'user' if not already set
+        }, {
+          onConflict: 'id',
         });
         console.log('Profile upsert result (signIn):', { upsertError, upsertData });
+        
+        // If role column doesn't exist, try to add it via RPC (if available) or log a warning
+        if (upsertError?.message?.includes('column') && upsertError?.message?.includes('role')) {
+          console.warn('Role column may not exist in profiles table. Please add it manually or run migration.');
+        }
 
         return {
           success: true,
@@ -233,8 +247,16 @@ export class AuthService {
           id: userId,
           full_name: fullName,
           email,
+          role: 'user', // Ensure role is set to 'user' if not already set
+        }, {
+          onConflict: 'id',
         });
         console.log('Profile upsert result (2FA verify):', { upsertError });
+        
+        // If role column doesn't exist, log a warning
+        if (upsertError?.message?.includes('column') && upsertError?.message?.includes('role')) {
+          console.warn('Role column may not exist in profiles table. Please add it manually or run migration.');
+        }
       }
 
       return {

@@ -95,20 +95,20 @@ export function AnimatedDownload({
       setAnimatedProgress(externalProgress);
     } else if (isAnimating) {
       // Fallback to animated progress if no external progress provided
-      const progressInterval = setInterval(() => {
-        setAnimatedProgress((prev) => {
-          const next = prev + 1;
-          if (next >= 100) {
-            clearInterval(progressInterval);
-            return 100;
-          }
-          return next;
-        });
-      }, duration * 10);
+    const progressInterval = setInterval(() => {
+      setAnimatedProgress((prev) => {
+        const next = prev + 1;
+        if (next >= 100) {
+          clearInterval(progressInterval);
+          return 100;
+        }
+        return next;
+      });
+    }, duration * 10);
 
-      return () => {
-        clearInterval(progressInterval);
-      };
+    return () => {
+      clearInterval(progressInterval);
+    };
     } else {
       setAnimatedProgress(0);
     }
